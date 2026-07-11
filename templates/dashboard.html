@@ -1,0 +1,802 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SDN Traffic Monitoring Dashboard</title>
+
+    <!-- External Libraries -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.socket.io/4.5.0/socket.io.min.js"></script>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+
+    <style>
+        /* ============================================================
+           DESIGN TOKENS — SDN Operations Console
+           A schematic / HUD aesthetic for a network-engineering tool:
+           deep-space navy canvas, cyan telemetry accent, monospaced
+           data readouts, hairline "circuit" framing on every panel.
+           ============================================================ */
+        :root {
+            --bg: #080b13;
+            --bg-grid: #0c111c;
+            --panel: #0e1421;
+            --panel-2: #121a2b;
+            --border: #1e2a42;
+            --border-bright: #2a3c5e;
+            --cyan: #2dd4ee;
+            --cyan-dim: rgba(45, 212, 238, 0.12);
+            --success: #34d399;
+            --success-dim: rgba(52, 211, 153, 0.12);
+            --danger: #fb6b6b;
+            --danger-dim: rgba(251, 107, 107, 0.12);
+            --warning: #f5b12e;
+            --warning-dim: rgba(245, 177, 46, 0.12);
+            --text: #e7edf7;
+            --text-dim: #8291ab;
+            --text-faint: #4c5b78;
+            --font-display: 'Space Grotesk', sans-serif;
+            --font-mono: 'JetBrains Mono', monospace;
+            --font-body: 'Inter', sans-serif;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            background:
+                radial-gradient(circle at 15% 0%, rgba(45,212,238,0.06) 0%, transparent 45%),
+                radial-gradient(circle at 100% 20%, rgba(52,211,153,0.04) 0%, transparent 40%),
+                repeating-linear-gradient(0deg, rgba(255,255,255,0.014) 0px, rgba(255,255,255,0.014) 1px, transparent 1px, transparent 42px),
+                repeating-linear-gradient(90deg, rgba(255,255,255,0.014) 0px, rgba(255,255,255,0.014) 1px, transparent 1px, transparent 42px),
+                var(--bg);
+            font-family: var(--font-body);
+            color: var(--text);
+            min-height: 100vh;
+        }
+
+        h1, h5 { font-family: var(--font-display); letter-spacing: 0.2px; }
+
+        /* ---------------- Header ---------------- */
+        .dashboard-header {
+            position: relative;
+            background: linear-gradient(180deg, #0c1220 0%, #080b13 100%);
+            border-bottom: 1px solid var(--border);
+            color: var(--text);
+            padding: 22px 0;
+            margin-bottom: 34px;
+            overflow: hidden;
+        }
+
+        .dashboard-header::after {
+            content: "";
+            position: absolute;
+            left: 0; right: 0; bottom: 0;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, var(--cyan) 20%, var(--cyan) 80%, transparent);
+            opacity: 0.55;
+        }
+
+        .dashboard-header h1 {
+            font-size: 1.5rem;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 2px;
+        }
+
+        .dashboard-header h1 i {
+            color: var(--cyan);
+            font-size: 1.3rem;
+            filter: drop-shadow(0 0 8px rgba(45,212,238,0.5));
+        }
+
+        .dashboard-header p {
+            color: var(--text-dim);
+            font-family: var(--font-mono);
+            font-size: 0.78rem;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+        }
+
+        .dashboard-header .badge.bg-light {
+            background: var(--panel-2) !important;
+            border: 1px solid var(--border-bright);
+            color: var(--text) !important;
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            padding: 8px 14px;
+            border-radius: 999px;
+            letter-spacing: 0.03em;
+        }
+
+        .dashboard-header .btn-light {
+            background: var(--panel-2);
+            border: 1px solid var(--border-bright);
+            color: var(--text);
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            border-radius: 999px;
+        }
+
+        .dashboard-header .btn-light:hover {
+            background: var(--cyan-dim);
+            border-color: var(--cyan);
+            color: var(--cyan);
+        }
+
+        /* ---------------- Loading ---------------- */
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 20px;
+            color: var(--text-dim);
+            font-family: var(--font-mono);
+            font-size: 0.8rem;
+        }
+
+        .loading.active { display: block; }
+
+        .spinner-border.text-primary {
+            color: var(--cyan) !important;
+            border-right-color: transparent !important;
+        }
+
+        /* ---------------- Stat Cards ---------------- */
+        .stat-card {
+            position: relative;
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 18px 20px;
+            transition: border-color 0.25s, transform 0.25s;
+            margin-bottom: 20px;
+        }
+
+        .stat-card::before {
+            content: "";
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 2px;
+            background: var(--cyan);
+            opacity: 0.5;
+            border-radius: 10px 10px 0 0;
+        }
+
+        .stat-card.danger::before { background: var(--danger); }
+        .stat-card.success::before { background: var(--success); }
+        .stat-card.warning::before { background: var(--warning); }
+
+        .stat-card:hover {
+            transform: translateY(-3px);
+            border-color: var(--border-bright);
+        }
+
+        .stat-card .stat-label {
+            color: var(--text-dim);
+            font-family: var(--font-mono);
+            font-size: 0.72rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .stat-card .stat-label i { color: var(--cyan); font-size: 0.72rem; }
+        .stat-card.danger .stat-label i { color: var(--danger); }
+        .stat-card.success .stat-label i { color: var(--success); }
+
+        .stat-card .stat-number {
+            font-family: var(--font-mono);
+            font-size: 1.9rem;
+            font-weight: 600;
+            margin: 8px 0 0;
+            color: var(--text);
+            letter-spacing: -0.01em;
+        }
+
+        /* ---------------- Panels (chart / switches / controls) ---------------- */
+        .traffic-chart-container,
+        .switch-status {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 22px;
+            margin-bottom: 20px;
+        }
+
+        .traffic-chart-container h5,
+        .switch-status h5 {
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: var(--text);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+
+        .traffic-chart-container h5 i,
+        .switch-status h5 i { color: var(--cyan); font-size: 0.9rem; }
+
+        .traffic-chart-container .btn-success {
+            background: var(--success-dim);
+            border: 1px solid var(--success);
+            color: var(--success);
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            border-radius: 6px;
+        }
+        .traffic-chart-container .btn-success:hover { background: var(--success); color: #06251a; }
+
+        .traffic-chart-container .btn-danger {
+            background: var(--danger-dim);
+            border: 1px solid var(--danger);
+            color: var(--danger);
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            border-radius: 6px;
+        }
+        .traffic-chart-container .btn-danger:hover { background: var(--danger); color: #2a0c0c; }
+
+        /* ---------------- Switch list (JS-generated markup) ---------------- */
+        .switch-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 4px;
+            border-bottom: 1px solid var(--border);
+            font-family: var(--font-mono);
+            font-size: 0.82rem;
+        }
+
+        .switch-item:last-child { border-bottom: none; }
+
+        .switch-item strong { color: var(--text); font-weight: 600; }
+
+        .switch-item .badge.bg-secondary {
+            background: var(--panel-2) !important;
+            border: 1px solid var(--border-bright);
+            color: var(--text-dim) !important;
+            font-family: var(--font-mono);
+            font-weight: 500;
+            margin-left: 8px;
+            border-radius: 5px;
+        }
+
+        .switch-item .badge.bg-danger {
+            background: var(--danger-dim) !important;
+            border: 1px solid var(--danger);
+            color: var(--danger) !important;
+            font-weight: 500;
+            border-radius: 5px;
+        }
+
+        .status-badge {
+            padding: 4px 12px;
+            border-radius: 999px;
+            font-size: 0.72rem;
+            font-weight: 600;
+            font-family: var(--font-mono);
+            letter-spacing: 0.03em;
+            border: 1px solid transparent;
+        }
+
+        .status-badge.healthy {
+            background: var(--success-dim);
+            color: var(--success);
+            border-color: var(--success);
+        }
+
+        .status-badge.congested {
+            background: var(--danger-dim);
+            color: var(--danger);
+            border-color: var(--danger);
+        }
+
+        .text-muted { color: var(--text-faint) !important; font-family: var(--font-mono); font-size: 0.82rem; }
+        .text-success { color: var(--success) !important; }
+        .text-danger { color: var(--danger) !important; }
+
+        /* ---------------- Traffic Controls form ---------------- */
+        .switch-status label {
+            color: var(--text-dim);
+            font-family: var(--font-mono);
+            font-size: 0.72rem;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            margin-bottom: 4px;
+            display: block;
+        }
+
+        .form-control.form-control-sm {
+            background: var(--panel-2);
+            border: 1px solid var(--border);
+            color: var(--text);
+            font-family: var(--font-mono);
+            font-size: 0.85rem;
+            border-radius: 6px;
+        }
+
+        .form-control.form-control-sm:focus {
+            background: var(--panel-2);
+            border-color: var(--cyan);
+            color: var(--text);
+            box-shadow: 0 0 0 3px var(--cyan-dim);
+        }
+
+        select.form-control option { background: var(--panel-2); color: var(--text); }
+
+        /* ---------------- Buttons ---------------- */
+        .control-btn {
+            margin: 4px 6px 4px 0;
+            padding: 9px 18px;
+            border-radius: 7px;
+            border: 1px solid transparent;
+            font-family: var(--font-mono);
+            font-size: 0.78rem;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+            transition: transform 0.15s, filter 0.15s;
+        }
+
+        .control-btn:hover { transform: translateY(-1px); filter: brightness(1.1); }
+
+        .control-btn.primary { background: var(--cyan); color: #06212b; }
+        .control-btn.success { background: var(--success); color: #06251a; }
+        .control-btn.danger { background: var(--danger); color: #2a0c0c; }
+        .control-btn.warning { background: var(--warning); color: #2a1c04; }
+
+        /* ---------------- Live indicator ---------------- */
+        .live-indicator {
+            display: inline-block;
+            width: 9px;
+            height: 9px;
+            border-radius: 50%;
+            margin-right: 8px;
+            position: relative;
+        }
+
+        .live-indicator.active {
+            background: var(--success);
+            box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.6);
+            animation: pulse-ring 1.6s infinite;
+        }
+
+        .live-indicator.inactive {
+            background: var(--danger);
+        }
+
+        @keyframes pulse-ring {
+            0% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.55); }
+            70% { box-shadow: 0 0 0 8px rgba(52, 211, 153, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0); }
+        }
+
+        /* ---------------- ML predictions panel ---------------- */
+        #predictionResult { font-family: var(--font-mono); font-size: 0.85rem; }
+
+        /* ---------------- Scrollbar polish ---------------- */
+        ::-webkit-scrollbar { width: 10px; height: 10px; }
+        ::-webkit-scrollbar-track { background: var(--bg); }
+        ::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 6px; }
+
+        @media (prefers-reduced-motion: reduce) {
+            .live-indicator.active { animation: none; }
+        }
+    </style>
+</head>
+<body>
+    <!-- Header -->
+    <div class="dashboard-header">
+        <div class="container">
+            <div class="row align-items-center">
+                <div class="col-md-6">
+                    <h1><i class="fas fa-network-wired"></i> SDN Traffic Monitor</h1>
+                    <p class="mb-0">Real-time Network Congestion Detection</p>
+                </div>
+                <div class="col-md-6 text-end">
+                    <span class="badge bg-light text-dark">
+                        <span class="live-indicator" id="liveIndicator"></span>
+                        <span id="statusText">Disconnected</span>
+                    </span>
+                    <button class="btn btn-light btn-sm ms-2" onclick="refreshData()">
+                        <i class="fas fa-sync-alt"></i> Refresh
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <!-- Loading -->
+        <div class="loading" id="loading">
+            <div class="spinner-border text-primary" role="status">
+                <span class="visually-hidden">Loading...</span>
+            </div>
+            <p>Fetching data...</p>
+        </div>
+
+        <!-- Stats Row -->
+        <div class="row" id="statsRow">
+            <div class="col-md-3 col-sm-6">
+                <div class="stat-card">
+                    <div class="stat-label"><i class="fas fa-sync-alt"></i> Current TX Speed</div>
+                    <div class="stat-number" id="currentTx">0 Kbps</div>
+                </div>
+            </div>
+            <div class="col-md-3 col-sm-6">
+                <div class="stat-card">
+                    <div class="stat-label"><i class="fas fa-sync-alt fa-rotate-180"></i> Current RX Speed</div>
+                    <div class="stat-number" id="currentRx">0 Kbps</div>
+                </div>
+            </div>
+            <div class="col-md-3 col-sm-6">
+                <div class="stat-card danger">
+                    <div class="stat-label"><i class="fas fa-exclamation-triangle"></i> Congestion Rate</div>
+                    <div class="stat-number" id="congestionRate">0%</div>
+                </div>
+            </div>
+            <div class="col-md-3 col-sm-6">
+                <div class="stat-card success">
+                    <div class="stat-label"><i class="fas fa-database"></i> Total Samples</div>
+                    <div class="stat-number" id="totalSamples">0</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Traffic Chart -->
+        <div class="traffic-chart-container">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h5><i class="fas fa-chart-line"></i> Live Traffic</h5>
+                <div>
+                    <button class="btn btn-sm btn-success" onclick="startMonitoring()">
+                        <i class="fas fa-play"></i> Start
+                    </button>
+                    <button class="btn btn-sm btn-danger" onclick="stopMonitoring()">
+                        <i class="fas fa-stop"></i> Stop
+                    </button>
+                </div>
+            </div>
+            <canvas id="trafficChart" height="100"></canvas>
+        </div>
+
+        <!-- Controls Row -->
+        <div class="row">
+            <div class="col-md-6">
+                <div class="switch-status">
+                    <h5><i class="fas fa-server"></i> Switch Status</h5>
+                    <div id="switchList">
+                        <p class="text-muted">No switches connected</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="switch-status">
+                    <h5><i class="fas fa-gamepad"></i> Traffic Controls</h5>
+                    <div class="mb-3">
+                        <label>Traffic Type:</label>
+                        <select id="trafficType" class="form-control form-control-sm">
+                            <option value="tcp">TCP</option>
+                            <option value="udp">UDP</option>
+                            <option value="mixed">Mixed</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label>Bandwidth:</label>
+                        <select id="bandwidth" class="form-control form-control-sm">
+                            <option value="5M">5 Mbps</option>
+                            <option value="10M">10 Mbps</option>
+                            <option value="20M">20 Mbps</option>
+                            <option value="50M">50 Mbps</option>
+                            <option value="100M">100 Mbps</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label>Duration (seconds):</label>
+                        <input type="number" id="duration" class="form-control form-control-sm" value="30">
+                    </div>
+                    <button class="control-btn primary" onclick="generateTraffic()">
+                        <i class="fas fa-play"></i> Generate Traffic
+                    </button>
+                    <button class="control-btn warning" onclick="trainModel()">
+                        <i class="fas fa-brain"></i> Train Model
+                    </button>
+                    <button class="control-btn danger" onclick="clearData()">
+                        <i class="fas fa-trash"></i> Clear Data
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ML Predictions -->
+        <div class="row mt-3">
+            <div class="col-12">
+                <div class="switch-status">
+                    <h5><i class="fas fa-robot"></i> ML Predictions</h5>
+                    <div id="predictionResult">
+                        <p class="text-muted">Wait for traffic data...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ==================== GLOBALS ====================
+        let socket = null;
+        let trafficChart = null;
+        let monitoringActive = false;
+        let chartData = {
+            labels: [],
+            tx: [],
+            rx: []
+        };
+        
+        // ==================== INITIALIZATION ====================
+        document.addEventListener('DOMContentLoaded', function() {
+            initSocket();
+            initChart();
+            refreshData();
+            setupAutoRefresh();
+        });
+        
+        // ==================== SOCKET.IO ====================
+        function initSocket() {
+            socket = io();
+            
+            socket.on('connect', function() {
+                document.getElementById('liveIndicator').className = 'live-indicator active';
+                document.getElementById('statusText').textContent = 'Connected';
+            });
+            
+            socket.on('disconnect', function() {
+                document.getElementById('liveIndicator').className = 'live-indicator inactive';
+                document.getElementById('statusText').textContent = 'Disconnected';
+            });
+            
+            socket.on('traffic_update', function(data) {
+                if (monitoringActive) {
+                    updateChart(data.data);
+                    updateStats();
+                }
+            });
+        }
+        
+        // ==================== CHART.JS ====================
+        function initChart() {
+            const ctx = document.getElementById('trafficChart').getContext('2d');
+            trafficChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [
+                        {
+                            label: 'TX Speed (Kbps)',
+                            data: [],
+                            borderColor: '#3498db',
+                            backgroundColor: 'rgba(52, 152, 219, 0.1)',
+                            fill: true,
+                            tension: 0.4
+                        },
+                        {
+                            label: 'RX Speed (Kbps)',
+                            data: [],
+                            borderColor: '#2ecc71',
+                            backgroundColor: 'rgba(46, 204, 113, 0.1)',
+                            fill: true,
+                            tension: 0.4
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            display: true,
+                            position: 'top'
+                        }
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            grid: {
+                                color: 'rgba(0,0,0,0.05)'
+                            }
+                        },
+                        x: {
+                            grid: {
+                                display: false
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        
+        // ==================== DATA FUNCTIONS ====================
+        function refreshData() {
+            document.getElementById('loading').classList.add('active');
+            
+            fetch('/api/stats')
+                .then(response => response.json())
+                .then(data => {
+                    updateStats(data);
+                })
+                .catch(error => console.error('Error:', error))
+                .finally(() => {
+                    document.getElementById('loading').classList.remove('active');
+                });
+            
+            fetch('/api/switches')
+                .then(response => response.json())
+                .then(data => {
+                    updateSwitches(data);
+                })
+                .catch(error => console.error('Error:', error));
+            
+            fetch('/api/traffic')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.length > 0) {
+                        updateChart(data);
+                    }
+                })
+                .catch(error => console.error('Error:', error));
+        }
+        
+        function updateStats(stats) {
+            if (!stats) {
+                fetch('/api/stats')
+                    .then(response => response.json())
+                    .then(data => updateStats(data));
+                return;
+            }
+            
+            document.getElementById('currentTx').textContent = `${Math.round(stats.current_tx || 0)} Kbps`;
+            document.getElementById('currentRx').textContent = `${Math.round(stats.current_rx || 0)} Kbps`;
+            document.getElementById('congestionRate').textContent = `${stats.congestion_rate?.toFixed(1) || 0}%`;
+            document.getElementById('totalSamples').textContent = stats.total_samples || 0;
+        }
+        
+        function updateSwitches(switches) {
+            const container = document.getElementById('switchList');
+            
+            if (!switches || switches.length === 0) {
+                container.innerHTML = '<p class="text-muted">No switches connected</p>';
+                return;
+            }
+            
+            let html = '';
+            switches.forEach(sw => {
+                const statusClass = sw.status.includes('Healthy') ? 'healthy' : 'congested';
+                html += `
+                    <div class="switch-item">
+                        <div>
+                            <strong>Switch ${sw.id}</strong>
+                            <span class="badge bg-secondary">${sw.port_count} ports</span>
+                        </div>
+                        <div>
+                            <span class="status-badge ${statusClass}">${sw.status}</span>
+                            <small class="text-muted ms-2">${Math.round(sw.tx_speed)} Kbps</small>
+                            ${sw.errors > 0 ? `<span class="badge bg-danger">${sw.errors} errors</span>` : ''}
+                        </div>
+                    </div>
+                `;
+            });
+            
+            container.innerHTML = html;
+        }
+        
+        function updateChart(data) {
+            // Update chart data
+            data.forEach(item => {
+                chartData.labels.push(new Date(item.timestamp * 1000).toLocaleTimeString());
+                chartData.tx.push(item.tx_kbps || 0);
+                chartData.rx.push(item.rx_kbps || 0);
+                
+                // Limit to 50 points
+                if (chartData.labels.length > 50) {
+                    chartData.labels.shift();
+                    chartData.tx.shift();
+                    chartData.rx.shift();
+                }
+            });
+            
+            trafficChart.data.labels = chartData.labels;
+            trafficChart.data.datasets[0].data = chartData.tx;
+            trafficChart.data.datasets[1].data = chartData.rx;
+            trafficChart.update();
+        }
+        
+        // ==================== MONITORING CONTROLS ====================
+        function startMonitoring() {
+            if (!monitoringActive) {
+                monitoringActive = true;
+                socket.emit('start_monitoring');
+                document.getElementById('statusText').textContent = 'Monitoring...';
+                document.getElementById('liveIndicator').className = 'live-indicator active';
+            }
+        }
+        
+        function stopMonitoring() {
+            if (monitoringActive) {
+                monitoringActive = false;
+                socket.emit('stop_monitoring');
+                document.getElementById('statusText').textContent = 'Stopped';
+                document.getElementById('liveIndicator').className = 'live-indicator inactive';
+            }
+        }
+        
+        // ==================== TRAFFIC GENERATION ====================
+        function generateTraffic() {
+            const type = document.getElementById('trafficType').value;
+            const bandwidth = document.getElementById('bandwidth').value;
+            const duration = document.getElementById('duration').value;
+            
+            fetch('/api/generate_traffic', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    type: type,
+                    bandwidth: bandwidth,
+                    duration: parseInt(duration)
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                alert(`✅ ${data.message}`);
+                setTimeout(refreshData, 5000);
+            })
+            .catch(error => {
+                alert('❌ Error: ' + error);
+            });
+        }
+        
+        // ==================== MODEL TRAINING ====================
+        function trainModel() {
+            if (confirm('Train the ML model? This may take a few seconds.')) {
+                document.getElementById('predictionResult').innerHTML = 
+                    '<div class="text-center"><div class="spinner-border text-primary"></div><p>Training model...</p></div>';
+                
+                fetch('/api/train_model')
+                    .then(response => response.json())
+                    .then(data => {
+                        alert('✅ Model training complete! Check console for details.');
+                        document.getElementById('predictionResult').innerHTML = 
+                            '<p class="text-success">✅ Model trained successfully!</p>';
+                    })
+                    .catch(error => {
+                        alert('❌ Error training model: ' + error);
+                        document.getElementById('predictionResult').innerHTML = 
+                            '<p class="text-danger">❌ Training failed</p>';
+                    });
+            }
+        }
+        
+        // ==================== CLEAR DATA ====================
+        function clearData() {
+            if (confirm('Clear all data? This cannot be undone!')) {
+                // TODO: Implement clear data
+                alert('Data cleared (implement this)');
+            }
+        }
+        
+        // ==================== AUTO REFRESH ====================
+        function setupAutoRefresh() {
+            setInterval(() => {
+                if (!monitoringActive) {
+                    refreshData();
+                }
+            }, 10000);
+        }
+    </script>
+</body>
+</html>
