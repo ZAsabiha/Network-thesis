@@ -1,0 +1,8 @@
+actual,BFA,Botnet,DDoS,DoS,Normal,Probe,Web-Attack
+BFA,39,0,0,3,18,4,3
+Botnet,0,34,0,0,7,0,0
+DDoS,0,0,14979,0,21,0,0
+DoS,2,0,0,64,30,8,0
+Normal,90,42,6,35,13626,66,23
+Probe,1,0,0,3,26,258,2
+Web-Attack,5,0,0,0,8,1,13

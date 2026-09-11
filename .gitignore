@@ -1,0 +1,65 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+venv-ryu/
+venv-app/
+.venv/
+env/
+ENV/
+
+# Environment files
+.env
+.env.*
+
+# Model artifacts.
+# model/ids_model.pkl is 266 MB - well past GitHub's 100 MB hard limit, so a
+# push containing it is rejected outright. Regenerate it instead:
+#   python3 model/train_model.py --csv data/<your dataset>.csv
+# model_metadata.json IS tracked - it is the deployment contract (feature list,
+# class labels, metrics) and is what tests/ and the controller validate against.
+*.pkl
+*.joblib
+*.h5
+*.pt
+*.onnx
+
+# Training datasets. InSDN / CICIDS2017 CSVs are hundreds of MB and are not
+# ours to redistribute - keep the folder, ignore the contents.
+data/*
+!data/.gitkeep
+
+# Runtime database. Regenerated on backend startup; committing it means
+# everyone's alert history collides in every merge.
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+
+# Mininet leftovers
+*.pid
+mn.log
+
+# Jupyter / notebook checkpoints
+.ipynb_checkpoints/
+
+# OS / editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# Streamlit local config/secrets
+.streamlit/secrets.toml
+.streamlit/config.toml
+# Dataset archives. InSDN unpacks to 142 MB of CSV; keep the zip out of git too
+# and re-download it instead (Kaggle: badcodebuilder/insdn-dataset).
+*.zip

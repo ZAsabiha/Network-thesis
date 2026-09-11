@@ -1,0 +1,421 @@
+{
+  "model": "/home/sabiha/sdn-te-project/model/ids_model.pkl",
+  "dataset": "/home/sabiha/sdn-te-project/data",
+  "thesis_ready": true,
+  "n_test_samples": 29417,
+  "labels": [
+    "BFA",
+    "Botnet",
+    "DDoS",
+    "DoS",
+    "Normal",
+    "Probe",
+    "Web-Attack"
+  ],
+  "summary": {
+    "accuracy": 0.9863,
+    "precision_macro": 0.6308,
+    "precision_weighted": 0.9893,
+    "recall_macro": 0.7682,
+    "recall_weighted": 0.9863,
+    "f1_macro": 0.681,
+    "f1_weighted": 0.9875,
+    "false_positive_rate_overall": 0.0189
+  },
+  "false_positive_rate_per_class": {
+    "BFA": 0.0033,
+    "Botnet": 0.0014,
+    "DDoS": 0.0004,
+    "DoS": 0.0014,
+    "Normal": 0.0071,
+    "Probe": 0.0027,
+    "Web-Attack": 0.001
+  },
+  "per_class": {
+    "BFA": {
+      "precision": 0.2846715328467153,
+      "recall": 0.582089552238806,
+      "f1-score": 0.38235294117647056,
+      "support": 67.0
+    },
+    "Botnet": {
+      "precision": 0.4473684210526316,
+      "recall": 0.8292682926829268,
+      "f1-score": 0.5811965811965812,
+      "support": 41.0
+    },
+    "DDoS": {
+      "precision": 0.9995995995995997,
+      "recall": 0.9986,
+      "f1-score": 0.9990995497748875,
+      "support": 15000.0
+    },
+    "DoS": {
+      "precision": 0.6095238095238096,
+      "recall": 0.6153846153846154,
+      "f1-score": 0.6124401913875598,
+      "support": 104.0
+    },
+    "Normal": {
+      "precision": 0.9919918462434478,
+      "recall": 0.9811347926267281,
+      "f1-score": 0.9865334491746307,
+      "support": 13888.0
+    },
+    "Probe": {
+      "precision": 0.7655786350148368,
+      "recall": 0.8896551724137931,
+      "f1-score": 0.8229665071770335,
+      "support": 290.0
+    },
+    "Web-Attack": {
+      "precision": 0.3170731707317073,
+      "recall": 0.48148148148148145,
+      "f1-score": 0.38235294117647056,
+      "support": 27.0
+    },
+    "accuracy": 0.986266444572866,
+    "macro avg": {
+      "precision": 0.6308295735732498,
+      "recall": 0.7682305581183358,
+      "f1-score": 0.6809917372948048,
+      "support": 29417.0
+    },
+    "weighted avg": {
+      "precision": 0.9892973827562777,
+      "recall": 0.986266444572866,
+      "f1-score": 0.987510422274395,
+      "support": 29417.0
+    }
+  },
+  "confusion_matrix": [
+    [
+      39,
+      0,
+      0,
+      3,
+      18,
+      4,
+      3
+    ],
+    [
+      0,
+      34,
+      0,
+      0,
+      7,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      14979,
+      0,
+      21,
+      0,
+      0
+    ],
+    [
+      2,
+      0,
+      0,
+      64,
+      30,
+      8,
+      0
+    ],
+    [
+      90,
+      42,
+      6,
+      35,
+      13626,
+      66,
+      23
+    ],
+    [
+      1,
+      0,
+      0,
+      3,
+      26,
+      258,
+      2
+    ],
+    [
+      5,
+      0,
+      0,
+      0,
+      8,
+      1,
+      13
+    ]
+  ],
+  "latency": {
+    "single_flow_ms": {
+      "mean": 56.829,
+      "p50": 52.777,
+      "p95": 75.402,
+      "p99": 97.965
+    },
+    "batched": {
+      "batch_8": {
+        "total_ms": 52.313,
+        "per_flow_ms": 6.5391
+      },
+      "batch_32": {
+        "total_ms": 55.885,
+        "per_flow_ms": 1.7464
+      },
+      "batch_128": {
+        "total_ms": 73.199,
+        "per_flow_ms": 0.5719
+      }
+    },
+    "note": "Model inference only. End-to-end detection latency also includes the flow-stats poll interval, which dominates."
+  },
+  "threshold_sweep": [
+    {
+      "threshold": 0.0,
+      "detection_rate_recall": 0.9929,
+      "correct_class_rate": 0.9909,
+      "false_positive_rate": 0.0189,
+      "precision": 0.9833,
+      "accuracy": 0.9863,
+      "tp": 15419,
+      "fp": 262,
+      "fn": 110,
+      "tn": 13626
+    },
+    {
+      "threshold": 0.05,
+      "detection_rate_recall": 0.9929,
+      "correct_class_rate": 0.9909,
+      "false_positive_rate": 0.0189,
+      "precision": 0.9833,
+      "accuracy": 0.9863,
+      "tp": 15419,
+      "fp": 262,
+      "fn": 110,
+      "tn": 13626
+    },
+    {
+      "threshold": 0.1,
+      "detection_rate_recall": 0.9929,
+      "correct_class_rate": 0.9909,
+      "false_positive_rate": 0.0189,
+      "precision": 0.9833,
+      "accuracy": 0.9863,
+      "tp": 15419,
+      "fp": 262,
+      "fn": 110,
+      "tn": 13626
+    },
+    {
+      "threshold": 0.15,
+      "detection_rate_recall": 0.9929,
+      "correct_class_rate": 0.9909,
+      "false_positive_rate": 0.0189,
+      "precision": 0.9833,
+      "accuracy": 0.9863,
+      "tp": 15419,
+      "fp": 262,
+      "fn": 110,
+      "tn": 13626
+    },
+    {
+      "threshold": 0.2,
+      "detection_rate_recall": 0.9929,
+      "correct_class_rate": 0.9909,
+      "false_positive_rate": 0.0189,
+      "precision": 0.9833,
+      "accuracy": 0.9863,
+      "tp": 15419,
+      "fp": 262,
+      "fn": 110,
+      "tn": 13626
+    },
+    {
+      "threshold": 0.25,
+      "detection_rate_recall": 0.9929,
+      "correct_class_rate": 0.9909,
+      "false_positive_rate": 0.0189,
+      "precision": 0.9833,
+      "accuracy": 0.9863,
+      "tp": 15419,
+      "fp": 262,
+      "fn": 110,
+      "tn": 13626
+    },
+    {
+      "threshold": 0.3,
+      "detection_rate_recall": 0.9929,
+      "correct_class_rate": 0.9909,
+      "false_positive_rate": 0.0189,
+      "precision": 0.9833,
+      "accuracy": 0.9863,
+      "tp": 15418,
+      "fp": 262,
+      "fn": 111,
+      "tn": 13626
+    },
+    {
+      "threshold": 0.35,
+      "detection_rate_recall": 0.9929,
+      "correct_class_rate": 0.9909,
+      "false_positive_rate": 0.0189,
+      "precision": 0.9833,
+      "accuracy": 0.9863,
+      "tp": 15418,
+      "fp": 262,
+      "fn": 111,
+      "tn": 13626
+    },
+    {
+      "threshold": 0.4,
+      "detection_rate_recall": 0.9929,
+      "correct_class_rate": 0.9909,
+      "false_positive_rate": 0.0189,
+      "precision": 0.9833,
+      "accuracy": 0.9863,
+      "tp": 15418,
+      "fp": 262,
+      "fn": 111,
+      "tn": 13626
+    },
+    {
+      "threshold": 0.45,
+      "detection_rate_recall": 0.9923,
+      "correct_class_rate": 0.9905,
+      "false_positive_rate": 0.0186,
+      "precision": 0.9835,
+      "accuracy": 0.9862,
+      "tp": 15410,
+      "fp": 259,
+      "fn": 119,
+      "tn": 13629
+    },
+    {
+      "threshold": 0.5,
+      "detection_rate_recall": 0.992,
+      "correct_class_rate": 0.9904,
+      "false_positive_rate": 0.0179,
+      "precision": 0.9841,
+      "accuracy": 0.9865,
+      "tp": 15404,
+      "fp": 249,
+      "fn": 125,
+      "tn": 13639
+    },
+    {
+      "threshold": 0.55,
+      "detection_rate_recall": 0.9912,
+      "correct_class_rate": 0.99,
+      "false_positive_rate": 0.0155,
+      "precision": 0.9862,
+      "accuracy": 0.9874,
+      "tp": 15392,
+      "fp": 215,
+      "fn": 137,
+      "tn": 13673
+    },
+    {
+      "threshold": 0.6,
+      "detection_rate_recall": 0.9904,
+      "correct_class_rate": 0.9895,
+      "false_positive_rate": 0.0122,
+      "precision": 0.9891,
+      "accuracy": 0.9887,
+      "tp": 15380,
+      "fp": 169,
+      "fn": 149,
+      "tn": 13719
+    },
+    {
+      "threshold": 0.65,
+      "detection_rate_recall": 0.9889,
+      "correct_class_rate": 0.9885,
+      "false_positive_rate": 0.0084,
+      "precision": 0.9925,
+      "accuracy": 0.99,
+      "tp": 15357,
+      "fp": 116,
+      "fn": 172,
+      "tn": 13772
+    },
+    {
+      "threshold": 0.7,
+      "detection_rate_recall": 0.9876,
+      "correct_class_rate": 0.9871,
+      "false_positive_rate": 0.0037,
+      "precision": 0.9967,
+      "accuracy": 0.9915,
+      "tp": 15336,
+      "fp": 51,
+      "fn": 193,
+      "tn": 13837
+    },
+    {
+      "threshold": 0.75,
+      "detection_rate_recall": 0.9865,
+      "correct_class_rate": 0.986,
+      "false_positive_rate": 0.003,
+      "precision": 0.9973,
+      "accuracy": 0.9912,
+      "tp": 15319,
+      "fp": 42,
+      "fn": 210,
+      "tn": 13846
+    },
+    {
+      "threshold": 0.8,
+      "detection_rate_recall": 0.9853,
+      "correct_class_rate": 0.9849,
+      "false_positive_rate": 0.0022,
+      "precision": 0.998,
+      "accuracy": 0.991,
+      "tp": 15300,
+      "fp": 30,
+      "fn": 229,
+      "tn": 13858
+    },
+    {
+      "threshold": 0.85,
+      "detection_rate_recall": 0.9836,
+      "correct_class_rate": 0.9834,
+      "false_positive_rate": 0.0013,
+      "precision": 0.9988,
+      "accuracy": 0.9906,
+      "tp": 15275,
+      "fp": 18,
+      "fn": 254,
+      "tn": 13870
+    },
+    {
+      "threshold": 0.9,
+      "detection_rate_recall": 0.9826,
+      "correct_class_rate": 0.9824,
+      "false_positive_rate": 0.0006,
+      "precision": 0.9994,
+      "accuracy": 0.9904,
+      "tp": 15259,
+      "fp": 9,
+      "fn": 270,
+      "tn": 13879
+    },
+    {
+      "threshold": 0.95,
+      "detection_rate_recall": 0.9802,
+      "correct_class_rate": 0.98,
+      "false_positive_rate": 0.0004,
+      "precision": 0.9996,
+      "accuracy": 0.9893,
+      "tp": 15221,
+      "fp": 6,
+      "fn": 308,
+      "tn": 13882
+    }
+  ]
+}

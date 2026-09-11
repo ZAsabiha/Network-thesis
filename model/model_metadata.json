@@ -1,0 +1,292 @@
+{
+  "model": "Pipeline(StandardScaler, RandomForestClassifier)",
+  "model_file": "ids_model.pkl",
+  "features": [
+    "duration_sec",
+    "packet_count",
+    "packet_rate",
+    "protocol",
+    "flows_to_dst",
+    "distinct_srcs_to_dst",
+    "flows_from_src",
+    "distinct_dsts_from_src"
+  ],
+  "n_features": 8,
+  "context_features_used": true,
+  "byte_features_used": false,
+  "classes": [
+    "BFA",
+    "Botnet",
+    "DDoS",
+    "DoS",
+    "Normal",
+    "Probe",
+    "Web-Attack"
+  ],
+  "dataset": "/home/sabiha/sdn-te-project/data",
+  "thesis_ready": true,
+  "training_date": "2026-09-10T16:26:00+00:00",
+  "training_seconds": 2.6,
+  "n_train_samples": 88249,
+  "n_test_samples": 29417,
+  "model_size_mb": 35.5,
+  "flow_entry_emulation": {
+    "flow_timeout_sec": 10.0,
+    "polls_per_entry": 3,
+    "max_per_class": 60000,
+    "min_samples": 100,
+    "note": "Dataset micro-flows were re-aggregated into unidirectional OpenFlow flow-table entries before training so that the training distribution matches what the Ryu controller reads from OFPFlowStatsReply."
+  },
+  "hyperparameters": {
+    "n_estimators": 150,
+    "max_depth": 20,
+    "class_weight": "balanced",
+    "random_state": 42,
+    "test_size": 0.25
+  },
+  "protocol_encoding": {
+    "scheme": "IANA protocol numbers (matches OpenFlow ip_proto)",
+    "icmp": 1,
+    "tcp": 6,
+    "udp": 17,
+    "other": 0
+  },
+  "metrics": {
+    "accuracy": 0.9863,
+    "precision_macro": 0.6308,
+    "precision_weighted": 0.9893,
+    "recall_macro": 0.7682,
+    "recall_weighted": 0.9863,
+    "f1_macro": 0.681,
+    "f1_weighted": 0.9875,
+    "false_positive_rate_overall": 0.0189,
+    "false_positive_rate_per_class": {
+      "BFA": 0.0033,
+      "Botnet": 0.0014,
+      "DDoS": 0.0004,
+      "DoS": 0.0014,
+      "Normal": 0.0071,
+      "Probe": 0.0027,
+      "Web-Attack": 0.001
+    },
+    "per_class": {
+      "BFA": {
+        "precision": 0.2846715328467153,
+        "recall": 0.582089552238806,
+        "f1-score": 0.38235294117647056,
+        "support": 67.0
+      },
+      "Botnet": {
+        "precision": 0.4473684210526316,
+        "recall": 0.8292682926829268,
+        "f1-score": 0.5811965811965812,
+        "support": 41.0
+      },
+      "DDoS": {
+        "precision": 0.9995995995995997,
+        "recall": 0.9986,
+        "f1-score": 0.9990995497748875,
+        "support": 15000.0
+      },
+      "DoS": {
+        "precision": 0.6095238095238096,
+        "recall": 0.6153846153846154,
+        "f1-score": 0.6124401913875598,
+        "support": 104.0
+      },
+      "Normal": {
+        "precision": 0.9919918462434478,
+        "recall": 0.9811347926267281,
+        "f1-score": 0.9865334491746307,
+        "support": 13888.0
+      },
+      "Probe": {
+        "precision": 0.7655786350148368,
+        "recall": 0.8896551724137931,
+        "f1-score": 0.8229665071770335,
+        "support": 290.0
+      },
+      "Web-Attack": {
+        "precision": 0.3170731707317073,
+        "recall": 0.48148148148148145,
+        "f1-score": 0.38235294117647056,
+        "support": 27.0
+      },
+      "accuracy": 0.986266444572866,
+      "macro avg": {
+        "precision": 0.6308295735732498,
+        "recall": 0.7682305581183358,
+        "f1-score": 0.6809917372948048,
+        "support": 29417.0
+      },
+      "weighted avg": {
+        "precision": 0.9892973827562777,
+        "recall": 0.986266444572866,
+        "f1-score": 0.987510422274395,
+        "support": 29417.0
+      }
+    },
+    "confusion_matrix": {
+      "labels": [
+        "BFA",
+        "Botnet",
+        "DDoS",
+        "DoS",
+        "Normal",
+        "Probe",
+        "Web-Attack"
+      ],
+      "matrix": [
+        [
+          39,
+          0,
+          0,
+          3,
+          18,
+          4,
+          3
+        ],
+        [
+          0,
+          34,
+          0,
+          0,
+          7,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          14979,
+          0,
+          21,
+          0,
+          0
+        ],
+        [
+          2,
+          0,
+          0,
+          64,
+          30,
+          8,
+          0
+        ],
+        [
+          90,
+          42,
+          6,
+          35,
+          13626,
+          66,
+          23
+        ],
+        [
+          1,
+          0,
+          0,
+          3,
+          26,
+          258,
+          2
+        ],
+        [
+          5,
+          0,
+          0,
+          0,
+          8,
+          1,
+          13
+        ]
+      ]
+    }
+  },
+  "latency": {
+    "single_flow_ms": {
+      "mean": 56.038,
+      "p50": 52.535,
+      "p95": 73.529,
+      "p99": 83.707
+    },
+    "batched": {
+      "batch_8": {
+        "total_ms": 51.252,
+        "per_flow_ms": 6.4066
+      },
+      "batch_32": {
+        "total_ms": 52.82,
+        "per_flow_ms": 1.6506
+      },
+      "batch_128": {
+        "total_ms": 76.949,
+        "per_flow_ms": 0.6012
+      }
+    },
+    "note": "Model inference only. End-to-end detection latency also includes the flow-stats poll interval, which dominates."
+  },
+  "deployment_coverage": {
+    "SYN flood    30k pkts / 3s, 60B": {
+      "predicted": "Normal",
+      "confidence": 0.587,
+      "expected_attack": true,
+      "as_expected": false
+    },
+    "UDP flood    20k pkts / 5s, 1KB": {
+      "predicted": "Normal",
+      "confidence": 0.48,
+      "expected_attack": true,
+      "as_expected": false
+    },
+    "ICMP flood    9k pkts / 3s, 98B": {
+      "predicted": "Normal",
+      "confidence": 0.68,
+      "expected_attack": true,
+      "as_expected": false
+    },
+    "Spoofed DDoS in  2 pkts, 8k srcs": {
+      "predicted": "DDoS",
+      "confidence": 0.867,
+      "expected_attack": true,
+      "as_expected": true
+    },
+    "Spoofed DDoS out 2 pkts, 8k dsts": {
+      "predicted": "Normal",
+      "confidence": 0.733,
+      "expected_attack": true,
+      "as_expected": false
+    },
+    "Port scan     3 pkts, 800 dsts": {
+      "predicted": "Normal",
+      "confidence": 0.8,
+      "expected_attack": true,
+      "as_expected": false
+    },
+    "Normal web     40 pkts / 5s": {
+      "predicted": "Normal",
+      "confidence": 0.98,
+      "expected_attack": false,
+      "as_expected": true
+    },
+    "Normal ping    10 pkts / 10s": {
+      "predicted": "Normal",
+      "confidence": 0.773,
+      "expected_attack": false,
+      "as_expected": true
+    }
+  },
+  "uncovered_shapes": [
+    "SYN flood    30k pkts / 3s, 60B",
+    "UDP flood    20k pkts / 5s, 1KB",
+    "ICMP flood    9k pkts / 3s, 98B",
+    "Spoofed DDoS out 2 pkts, 8k dsts",
+    "Port scan     3 pkts, 800 dsts"
+  ],
+  "environment": {
+    "python": "3.9.25",
+    "scikit_learn": "1.6.1",
+    "numpy": "2.0.2",
+    "pandas": "2.3.3"
+  }
+}
