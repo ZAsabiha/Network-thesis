@@ -1,10 +1,10 @@
 """
 streamlit_app.py
 ===================
-Live dashboard polling the FastAPI backend.
+Minimal live dashboard polling the FastAPI backend.
 
-Raises a visible alert the moment a new attack lands: a red banner naming
-the attack, a toast popup, and severity colouring in the feed table.
+Does one job: raise a visible alert the moment a new attack is detected
+(red banner + toast) and list the captured alerts in a feed table.
 
 RUN:
   cd dashboard && streamlit run streamlit_app.py
@@ -32,11 +32,9 @@ SEVERITY = {
 DEFAULT_SEVERITY = "#d1495b"
 
 st.set_page_config(page_title="SDN Intrusion Detection Dashboard", layout="wide")
-st.title("SDN Intrusion Detection & Mitigation Dashboard")
+st.title("ML-Based SDN Intrusion Detection Dashboard")
 
 refresh_sec = st.sidebar.slider("Refresh interval (sec)", 1, 10, 3)
-window_sec = st.sidebar.slider("Stats window (sec)", 60, 3600, 300)
-sound_banner = st.sidebar.checkbox("Show alert banner", value=True)
 
 # Survives st.rerun(), so we can tell a genuinely new alert apart from one
 # we have already announced. Without this the banner would re-fire on every
@@ -77,10 +75,7 @@ def render_banner(alert):
           &nbsp;&middot;&nbsp; confidence {alert['confidence']:.0%}
           &nbsp;&middot;&nbsp; {alert['packet_count']:,} packets
           &nbsp;&middot;&nbsp; switch {alert['dpid']}
-          &nbsp;&middot;&nbsp; {when}<br>
-          <span style="opacity:.85;font-size:.9rem">
-            triggered by: {alert.get('detected_by') or 'n/a'}
-          </span>
+          &nbsp;&middot;&nbsp; {when}
         </div>
         """,
         unsafe_allow_html=True,
@@ -90,10 +85,9 @@ def render_banner(alert):
 placeholder = st.empty()
 
 with placeholder.container():
-    stats = fetch_json("/stats", {"window_sec": window_sec})
     alerts = fetch_json("/alerts", {"limit": 200})
 
-    if stats is None or alerts is None:
+    if alerts is None:
         st.error("Cannot reach backend at "
                   f"{BACKEND_URL}. Is `uvicorn main:app` running in backend/?")
     else:
@@ -121,42 +115,19 @@ with placeholder.container():
         if len(fresh) > 3:
             st.toast(f"+{len(fresh) - 3} more alerts this refresh", icon="🚨")
 
-        if sound_banner and alerts:
-            # Keep the banner up for the newest alert as long as it is recent,
-            # not only on the refresh that first saw it - otherwise it flashes
-            # for one cycle and vanishes before you can read it.
-            latest = alerts[0]
-            if time.time() - latest["timestamp"] <= max(window_sec, 30):
-                render_banner(latest)
-        elif sound_banner:
+        # ---- banner --------------------------------------------------
+        if alerts:
+            render_banner(alerts[0])
+        else:
             st.success("No attacks detected. Monitoring...")
 
-        # ---- metrics --------------------------------------------------
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Total Alerts (window)", stats["total_alerts"])
-        col2.metric("Distinct Attacker IPs", stats["distinct_attacker_ips"])
-        col3.metric("Attack Classes Seen", len(stats["by_class"]))
-        col4.metric("New This Refresh", len(fresh))
-
-        st.subheader("Attack Type Distribution")
-        if stats["by_class"]:
-            dist_df = pd.DataFrame(
-                list(stats["by_class"].items()), columns=["Attack Class", "Count"]
-            )
-            st.bar_chart(dist_df.set_index("Attack Class"))
-        else:
-            st.info("No alerts in this window yet.")
-
+        # ---- live alert feed -----------------------------------------
         st.subheader("Live Alert Feed")
         if alerts:
             df = pd.DataFrame(alerts)
             df["time"] = pd.to_datetime(df["timestamp"], unit="s")
-            cols = ["time", "attack_class", "confidence", "src_ip", "dst_ip",
-                    "dpid", "packet_count", "byte_count"]
-            for extra in ("detected_by", "ml_class", "ml_confidence"):
-                if extra in df.columns:
-                    cols.append(extra)
-            df = df[cols]
+            df = df[["time", "attack_class", "confidence", "src_ip", "dst_ip",
+                     "dpid", "packet_count"]]
             st.dataframe(
                 df.style.apply(highlight_severity, axis=1),
                 use_container_width=True,
@@ -165,12 +136,6 @@ with placeholder.container():
         else:
             st.info("No alerts yet - run an attack simulation from attacks/ "
                      "on the attacker host.")
-
-        st.subheader("Traffic Volume Over Time (alerts per minute)")
-        if alerts:
-            df["minute"] = df["time"].dt.floor("min")
-            vol = df.groupby("minute").size().reset_index(name="alerts")
-            st.line_chart(vol.set_index("minute"))
 
 st.caption(f"Auto-refreshing every {refresh_sec}s. Backend: {BACKEND_URL}")
 time.sleep(refresh_sec)
