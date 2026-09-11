@@ -5,6 +5,9 @@ Threshold / heuristic attack detector.
 
 WHY THIS EXISTS
 ---------------
+
+
+
 model/ids_model.pkl was trained on StandardScaler-normalised features, but
 only the classifier was pickled - the fitted scaler was never saved beside
 it. Feeding raw OpenFlow counters (duration=3.0, packets=30000, bytes=1.8e6)
@@ -172,3 +175,4 @@ class ThresholdDetector:
             }
 
         return None
+
