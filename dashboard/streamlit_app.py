@@ -1,10 +1,19 @@
 """
 streamlit_app.py
 ===================
-Minimal live dashboard polling the FastAPI backend.
+Live dashboard polling the FastAPI backend.
 
-Does one job: raise a visible alert the moment a new attack is detected
-(red banner + toast) and list the captured alerts in a feed table.
+Two jobs:
+  1. Raise a visible alert the moment a new attack is detected (red banner +
+     toast) and list the captured alerts in a feed table.
+  2. Draw the Mininet topology you built (from mininet_topo/topology_state.json)
+     and, whenever an attack is active, light up the attacker and the victim on
+     the graph with a red edge between them.
+
+The topology picture updates itself: rebuild the network at a different scale
+and the graph here follows on the next refresh. Attacker/victim identification
+comes straight from the IDS alert (src_ip = attacker, dst_ip = victim), so a
+node only turns red once the model has actually flagged the traffic.
 
 RUN:
   cd dashboard && streamlit run streamlit_app.py
@@ -16,10 +25,12 @@ import requests
 import pandas as pd
 import streamlit as st
 
+from topology_view import active_attacks, build_topology_dot, load_state
+
 # Override with IDS_BACKEND_URL to point at a backend on another port.
 BACKEND_URL = os.environ.get("IDS_BACKEND_URL", "http://127.0.0.1:8000")
 
-# Colour per attack class, used by both the banner and the table.
+# Colour per attack class, used by the banner and the table.
 SEVERITY = {
     "DDoS": "#b3001b",
     "DoS": "#d1495b",
@@ -82,14 +93,53 @@ def render_banner(alert):
     )
 
 
+def render_topology(state, active):
+    st.subheader("Network Topology")
+    if state is None:
+        st.info(
+            "No topology yet. Start the network with "
+            "`sudo python3 mininet_topo/topology.py` and this map appears "
+            "automatically once it writes topology_state.json.")
+        return
+
+    params = state.get("params", {})
+    st.caption(
+        "Mode: **%s** · %d switches · %d hosts · attackers: %s"
+        % (state.get("mode", "?"), len(state.get("switches", [])),
+           len(state.get("hosts", [])),
+           ", ".join(h["name"] for h in state["hosts"]
+                     if h["role"] == "attacker") or "none"))
+
+    # Text call-out of who is attacking whom, above the graph.
+    if active:
+        for a in active:
+            atk = a["attacker_name"] or a["attacker_ip"]
+            vic = "%s (%s)" % (a["victim_name"], a["victim_role"]) \
+                if a["victim_name"] else a["victim_ip"]
+            srcs = " from %d sources" % a["source_count"] \
+                if a["source_count"] > 1 else ""
+            st.error("🔴 **%s** → **%s** — %s at %.0f%% confidence%s"
+                     % (atk, vic, a["attack_class"], 100 * a["confidence"], srcs))
+    else:
+        st.success("No active attacks. Fabric shown in normal state.")
+
+    st.graphviz_chart(build_topology_dot(state, active), use_container_width=True)
+    st.caption("Legend: green=web · blue=dns · purple=db · grey=client/attacker · "
+               "dashed link=WAN (lossy). Red node=attacker, orange=victim during "
+               "an attack. Dark boxes are switches (core→aggregation→edge).")
+
+
 placeholder = st.empty()
 
 with placeholder.container():
     alerts = fetch_json("/alerts", {"limit": 200})
+    state = load_state()
 
     if alerts is None:
         st.error("Cannot reach backend at "
                   f"{BACKEND_URL}. Is `uvicorn main:app` running in backend/?")
+        # Still show the topology so the map is useful without a backend.
+        render_topology(state, [])
     else:
         # ---- new-alert detection -------------------------------------
         # /alerts comes back newest-first, so the highest id is alerts[0].
@@ -120,6 +170,11 @@ with placeholder.container():
             render_banner(alerts[0])
         else:
             st.success("No attacks detected. Monitoring...")
+
+        # ---- topology map with attacker/victim highlighting ----------
+        ip_map = {h["ip"]: h for h in state["hosts"]} if state else {}
+        active = active_attacks(alerts, ip_map, time.time())
+        render_topology(state, active)
 
         # ---- live alert feed -----------------------------------------
         st.subheader("Live Alert Feed")

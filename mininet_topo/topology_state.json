@@ -1,0 +1,189 @@
+{
+  "mode": "tree",
+  "params": {
+    "pods": 2,
+    "edges_per_pod": 2,
+    "hosts_per_edge": 3,
+    "k": 4,
+    "attackers": 3
+  },
+  "victim_ip": "10.1.1.1",
+  "servers": {
+    "web": "10.1.1.1",
+    "dns": "10.1.1.2",
+    "db": "10.1.1.3"
+  },
+  "hosts": [
+    {
+      "name": "h1",
+      "ip": "10.1.1.1",
+      "mac": "00:00:01:01:01:00",
+      "role": "web",
+      "edge_switch": "es1_1",
+      "pod": 0,
+      "link_profile": "lan"
+    },
+    {
+      "name": "h2",
+      "ip": "10.1.1.2",
+      "mac": "00:00:01:01:02:00",
+      "role": "dns",
+      "edge_switch": "es1_1",
+      "pod": 0,
+      "link_profile": "lan"
+    },
+    {
+      "name": "h3",
+      "ip": "10.1.1.3",
+      "mac": "00:00:01:01:03:00",
+      "role": "db",
+      "edge_switch": "es1_1",
+      "pod": 0,
+      "link_profile": "lan"
+    },
+    {
+      "name": "h4",
+      "ip": "10.1.2.1",
+      "mac": "00:00:01:02:01:00",
+      "role": "client",
+      "edge_switch": "es1_2",
+      "pod": 0,
+      "link_profile": "wan"
+    },
+    {
+      "name": "h5",
+      "ip": "10.1.2.2",
+      "mac": "00:00:01:02:02:00",
+      "role": "client",
+      "edge_switch": "es1_2",
+      "pod": 0,
+      "link_profile": "lan"
+    },
+    {
+      "name": "h6",
+      "ip": "10.1.2.3",
+      "mac": "00:00:01:02:03:00",
+      "role": "attacker",
+      "edge_switch": "es1_2",
+      "pod": 0,
+      "link_profile": "wan"
+    },
+    {
+      "name": "h7",
+      "ip": "10.2.3.1",
+      "mac": "00:00:02:03:01:00",
+      "role": "client",
+      "edge_switch": "es2_1",
+      "pod": 1,
+      "link_profile": "lan"
+    },
+    {
+      "name": "h8",
+      "ip": "10.2.3.2",
+      "mac": "00:00:02:03:02:00",
+      "role": "client",
+      "edge_switch": "es2_1",
+      "pod": 1,
+      "link_profile": "wan"
+    },
+    {
+      "name": "h9",
+      "ip": "10.2.3.3",
+      "mac": "00:00:02:03:03:00",
+      "role": "attacker",
+      "edge_switch": "es2_1",
+      "pod": 1,
+      "link_profile": "wan"
+    },
+    {
+      "name": "h10",
+      "ip": "10.2.4.1",
+      "mac": "00:00:02:04:01:00",
+      "role": "client",
+      "edge_switch": "es2_2",
+      "pod": 1,
+      "link_profile": "lan"
+    },
+    {
+      "name": "h11",
+      "ip": "10.2.4.2",
+      "mac": "00:00:02:04:02:00",
+      "role": "client",
+      "edge_switch": "es2_2",
+      "pod": 1,
+      "link_profile": "lan"
+    },
+    {
+      "name": "h12",
+      "ip": "10.2.4.3",
+      "mac": "00:00:02:04:03:00",
+      "role": "attacker",
+      "edge_switch": "es2_2",
+      "pod": 1,
+      "link_profile": "wan"
+    }
+  ],
+  "switches": [
+    {
+      "name": "as1",
+      "dpid": 101,
+      "tier": "agg"
+    },
+    {
+      "name": "as2",
+      "dpid": 102,
+      "tier": "agg"
+    },
+    {
+      "name": "cs1",
+      "dpid": 1,
+      "tier": "core"
+    },
+    {
+      "name": "es1_1",
+      "dpid": 201,
+      "tier": "edge"
+    },
+    {
+      "name": "es1_2",
+      "dpid": 202,
+      "tier": "edge"
+    },
+    {
+      "name": "es2_1",
+      "dpid": 203,
+      "tier": "edge"
+    },
+    {
+      "name": "es2_2",
+      "dpid": 204,
+      "tier": "edge"
+    }
+  ],
+  "fabric_links": [
+    [
+      "cs1",
+      "as1"
+    ],
+    [
+      "as1",
+      "es1_1"
+    ],
+    [
+      "as1",
+      "es1_2"
+    ],
+    [
+      "cs1",
+      "as2"
+    ],
+    [
+      "as2",
+      "es2_1"
+    ],
+    [
+      "as2",
+      "es2_2"
+    ]
+  ]
+}
