@@ -20,7 +20,8 @@ import requests
 import pandas as pd
 import streamlit as st
 
-from topology_view import active_attacks, build_topology_dot, load_state
+from topology_view import (ACTIVE_WINDOW_SEC, active_attacks,
+                           build_topology_dot, load_state)
 
 # Override with IDS_BACKEND_URL to point at a backend on another port.
 BACKEND_URL = os.environ.get("IDS_BACKEND_URL", "http://127.0.0.1:8000")
@@ -240,10 +241,14 @@ with placeholder.container():
             st.toast(f"+{len(fresh) - 3} more alerts this refresh", icon="🚨")
 
         # ---- banner --------------------------------------------------
-        if alerts:
-            render_banner(alerts[0])
+        # Only banner an attack that is still active: once the newest alert is
+        # older than the active window (the attacker withdrew), clear it instead
+        # of leaving a stale red banner up.
+        latest = alerts[0] if alerts else None
+        if latest and time.time() - latest.get("timestamp", 0) <= ACTIVE_WINDOW_SEC:
+            render_banner(latest)
         else:
-            st.success("No attacks detected. Monitoring...")
+            st.success("No active attacks. Monitoring...")
 
         # ---- topology map with attack DIRECTION ----------------------
         ip_map = {h["ip"]: h for h in state["hosts"]} if state else {}

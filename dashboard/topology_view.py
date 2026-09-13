@@ -19,9 +19,10 @@ STATE_PATH = os.environ.get(
                  "..", "mininet_topo", "topology_state.json"))
 
 # An alert counts as an ACTIVE attack (and is highlighted) for this many
-# seconds after its timestamp: long enough that a sustained attack stays lit,
-# short enough that the graph clears once it stops.
-ACTIVE_WINDOW_SEC = 15
+# seconds after its timestamp: long enough that a sustained attack stays lit
+# (the controller re-alerts on every ~3s poll), short enough that the graph and
+# banner clear within a few seconds once the attacker withdraws.
+ACTIVE_WINDOW_SEC = 6
 
 ROLE_FILL = {
     "web": "#2a9d8f",

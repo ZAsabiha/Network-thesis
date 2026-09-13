@@ -71,7 +71,10 @@ FLOW_HARD_TIMEOUT = 10
 
 # A flood stays detectable on every poll, so without a cooldown one hping3 run
 # writes an alert row every POLL_INTERVAL_SEC per flow and buries the feed.
-ALERT_COOLDOWN_SEC = 10
+# Kept just below the poll interval so an ongoing attack re-alerts on essentially
+# every poll: that keeps the newest alert fresh, which lets the dashboard's
+# active-attack window be small and clear quickly once the attacker withdraws.
+ALERT_COOLDOWN_SEC = 2
 
 NORMAL_CLASS = "Normal"
 
