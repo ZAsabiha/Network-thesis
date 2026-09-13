@@ -22,6 +22,7 @@ Prerequisites:
 The controller still runs if the backend is down; alerts are logged only.
 """
 
+import csv
 import json
 import os
 import sys
@@ -81,6 +82,17 @@ NORMAL_CLASS = "Normal"
 # genuine flood (thousands of packets per entry) is never touched.
 MIN_CLASSIFY_PACKETS = 5
 
+# TEMPORAL SMOOTHING. A flow's reported class is the argmax of its MEAN class
+# probability over the last SMOOTH_WINDOW_SEC, not the single-poll argmax. This
+# is the fix for the DoS -> Probe -> BFA flapping: those three classes sit on a
+# near-tie in feature space, and re-classifying a fresh (cumulative, resetting)
+# feature vector every poll tips the argmax between them. Averaging the
+# probabilities over a few polls keeps the dominant class and drops the noise.
+# Detection is NOT delayed - a brand-new flow has a one-sample window, so its
+# smoothed proba equals its raw proba on the first poll it appears.
+# Set to 0 to disable and recover the old per-poll behaviour.
+SMOOTH_WINDOW_SEC = 15
+
 # ----------------------------------------------------------------------------
 # MITIGATION. On an alert the controller pushes a high-priority DROP flow that
 # matches the attacker's MAC address, cutting them off in the data plane. MAC,
@@ -129,6 +141,23 @@ class IDSController(app_manager.RyuApp):
         self.latency_ms = deque(maxlen=500)
         self.flows_seen = 0
         self.alerts_raised = 0
+
+        # DEBUG PROBABILITY LOG (opt-in). Set IDS_PROBA_LOG to a file path to
+        # record one row PER FLOW PER POLL: identifiers, every model input
+        # feature, the winning class and the probability of every class. This
+        # is the raw material for the "why does DoS turn into Probe/BFA"
+        # investigation - it captures what the model actually saw each poll,
+        # BEFORE the reverse-flow drop and the per-victim aggregation collapse
+        # the picture. Nothing is logged unless the env var is set.
+        self.proba_log_path = os.environ.get("IDS_PROBA_LOG")
+        self._proba_log_fh = None
+        self._proba_writer = None
+
+        # Per-flow probability history for temporal smoothing (see
+        # SMOOTH_WINDOW_SEC). Keyed on (dpid, src_ip, dst_ip, ip_proto); each
+        # value is a deque of (time, proba_row) for the recent polls of that
+        # flow. Pruned as flows age out so it cannot grow without bound.
+        self.pred_history = {}
 
         self.model = None
         self.metadata = {}
@@ -326,12 +355,20 @@ class IDSController(app_manager.RyuApp):
         if not vectors:
             return
 
-        # Drop low-signal entries before inference (see MIN_CLASSIFY_PACKETS).
-        # A destination under a spoofed fan-in is kept even when each forged
-        # source sent only a packet or two, so DDoS detection is unaffected.
+        # Drop entries the model was never trained to read. A mitigation DROP
+        # rule matches eth_src only and a pure-L2 fallback flow carries no
+        # ipv4/ip_proto, so ip_proto is None: the model would see protocol 0
+        # with a MAC where an IP should be and scatter it across the attack
+        # classes (a blocked attacker's own DROP flow reads as DoS on every
+        # poll). Those are artifacts, not traffic - skip them before inference.
+        #
+        # Then drop low-signal entries (see MIN_CLASSIFY_PACKETS). A destination
+        # under a spoofed fan-in is kept even when each forged source sent only
+        # a packet or two, so DDoS detection is unaffected.
         kept = [(v, i) for v, i in zip(vectors, infos)
-                if i["packet_count"] >= MIN_CLASSIFY_PACKETS
-                or i["distinct_srcs_to_dst"] >= 3]
+                if i.get("ip_proto") is not None
+                and (i["packet_count"] >= MIN_CLASSIFY_PACKETS
+                     or i["distinct_srcs_to_dst"] >= 3)]
         if not kept:
             return
         vectors = [v for v, _ in kept]
@@ -354,12 +391,24 @@ class IDSController(app_manager.RyuApp):
         per_flow_ms = elapsed_ms / len(vectors)
         self.latency_ms.append(per_flow_ms)
 
+        # Raw per-flow probability trace (opt-in, see IDS_PROBA_LOG). Written
+        # here so it reflects exactly what predict_proba saw, before any
+        # suppression/aggregation. One row per flow per poll.
+        self._log_proba(dpid, vectors, infos, proba)
+
+        # Temporal smoothing: replace each flow's single-poll probabilities with
+        # its mean over the last SMOOTH_WINDOW_SEC. Everything downstream
+        # (threshold, argmax, per-victim verdict) then works on the smoothed
+        # numbers, so a flow that flaps DoS/Probe/BFA poll to poll reports its
+        # dominant class instead. The raw proba was already logged above.
+        proba_used = self._smooth_proba(dpid, infos, proba)
+
         # Reporting only: the model has already classified every flow
         # individually, nothing here decides whether traffic is malicious.
         # First pass - keep the flows the model flagged above threshold.
         classes = self.model.classes_
         flagged = []
-        for row, info in zip(proba, infos):
+        for row, info in zip(proba_used, infos):
             # A whitelisted server (its replies/backscatter) is never the
             # attacker - don't raise alerts for traffic it originates.
             if info.get("src_mac") in self.whitelist:
@@ -421,6 +470,75 @@ class IDSController(app_manager.RyuApp):
             avg = sum(self.latency_ms) / len(self.latency_ms)
             self.logger.debug("flows=%d alerts=%d mean_inference=%.3f ms/flow",
                               self.flows_seen, self.alerts_raised, avg)
+
+    def _log_proba(self, dpid, vectors, infos, proba):
+        """Append one CSV row per flow per poll when IDS_PROBA_LOG is set.
+
+        Columns: wall-clock time, dpid, src/dst/proto, the raw counters, every
+        model input feature (in self.model_features order), the winning class,
+        and the probability of every class the model knows. This is the log the
+        DoS->Probe->BFA investigation reads: it shows whether the switch is the
+        model becoming uncertain (probabilities near a tie) or the features
+        genuinely moving (duration/rate/context drifting poll to poll).
+        """
+        if not self.proba_log_path:
+            return
+        classes = [str(c) for c in self.model.classes_]
+        if self._proba_writer is None:
+            new = not os.path.exists(self.proba_log_path)
+            self._proba_log_fh = open(self.proba_log_path, "a", newline="")
+            self._proba_writer = csv.writer(self._proba_log_fh)
+            if new:
+                self._proba_writer.writerow(
+                    ["time", "dpid", "src_ip", "dst_ip", "protocol",
+                     "packet_count", "byte_count", "duration_sec"]
+                    + list(self.model_features)
+                    + ["predicted", "confidence"]
+                    + ["p_" + c for c in classes])
+        now = time.time()
+        for vec, info, row in zip(vectors, infos, proba):
+            feat = dict(zip(FEATURE_NAMES, vec))
+            j = int(row.argmax())
+            self._proba_writer.writerow(
+                [f"{now:.3f}", dpid, info["src_ip"], info["dst_ip"],
+                 info["ip_proto"], info["packet_count"], info["byte_count"],
+                 round(info["duration_sec"], 3)]
+                + [round(float(feat[f]), 3) for f in self.model_features]
+                + [classes[j], round(float(row[j]), 4)]
+                + [round(float(x), 4) for x in row])
+        self._proba_log_fh.flush()
+
+    def _smooth_proba(self, dpid, infos, proba):
+        """Return per-flow probabilities averaged over each flow's recent polls.
+
+        Keyed on (dpid, src, dst, proto). The window is time-based
+        (SMOOTH_WINDOW_SEC) so it self-adjusts to the poll interval and empties
+        when a flow goes quiet. A new flow averages over a single sample, so
+        first-poll detection is not delayed; a sustained flow averages over its
+        last few polls, which is what cancels the class flapping.
+        """
+        if SMOOTH_WINDOW_SEC <= 0:
+            return proba
+
+        now = time.time()
+        smoothed = []
+        for info, row in zip(infos, proba):
+            key = (dpid, info["src_ip"], info["dst_ip"], info["ip_proto"])
+            hist = self.pred_history.setdefault(key, deque(maxlen=16))
+            hist.append((now, row))
+            while hist and now - hist[0][0] > SMOOTH_WINDOW_SEC:
+                hist.popleft()
+            rows = [r for _, r in hist]
+            smoothed.append(sum(rows) / len(rows))
+
+        # Prune flows not seen for two windows so the dict cannot grow forever.
+        if len(self.pred_history) > 2048:
+            stale = [k for k, h in self.pred_history.items()
+                     if not h or now - h[-1][0] > 2 * SMOOTH_WINDOW_SEC]
+            for k in stale:
+                del self.pred_history[k]
+
+        return smoothed
 
     def _should_alert(self, dpid, info, attack_class):
         """
