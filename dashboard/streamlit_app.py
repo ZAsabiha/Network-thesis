@@ -47,9 +47,9 @@ _state = load_state()
 if _state:
     st.sidebar.markdown("### 🛡️ Manual Block")
     _hosts = _state.get("hosts", [])
-    _attackers = [h for h in _hosts if h["role"] == "attacker"] or _hosts
-    _labels = {f'{h["name"]} ({h["ip"]})': h for h in _attackers}
-    _pick = st.sidebar.selectbox("Attacker to block", list(_labels.keys()))
+    # List every host, not just the attacker-role ones, so any IP can be blocked.
+    _labels = {f'{h["name"]} ({h["ip"]}) — {h["role"]}': h for h in _hosts}
+    _pick = st.sidebar.selectbox("Host to block", list(_labels.keys()))
     _dur = st.sidebar.slider("Block for (sec)", 30, 600, 30, step=30)
     if st.sidebar.button("🚫 Block now"):
         _h = _labels[_pick]
