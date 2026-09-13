@@ -341,6 +341,10 @@ class IDSController(app_manager.RyuApp):
             if info.get("src_mac") in self.whitelist:
                 continue
             idx = int(row.argmax())
+            predicted, confidence = str(classes[idx]), float(row[idx])
+            if predicted == NORMAL_CLASS or confidence < CONFIDENCE_THRESHOLD:
+                continue
+            flagged.setdefault((info["dst_ip"], predicted), []).append((info, confidence))
         
         for (dst_ip, predicted), items in flagged.items():
             # Report the worst-offending flow as the representative, and say how
