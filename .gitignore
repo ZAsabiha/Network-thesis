@@ -63,4 +63,4 @@ Thumbs.db
 # Dataset archives. InSDN unpacks to 142 MB of CSV; keep the zip out of git too
 # and re-download it instead (Kaggle: badcodebuilder/insdn-dataset).
 *.zip
-.tex
+*.tex
