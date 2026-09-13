@@ -248,8 +248,16 @@ with placeholder.container():
         # ---- live alert feed -----------------------------------------
         st.subheader("Live Alert Feed")
         if alerts:
-            df = pd.DataFrame(alerts)
-            df["time"] = pd.to_datetime(df["timestamp"], unit="s")
+            full = pd.DataFrame(alerts)
+            full["time"] = pd.to_datetime(full["timestamp"], unit="s")
+
+            # One verdict per victim: keep the highest-confidence class seen for
+            # each destination, newest first. The model emits several classes
+            # for a single attack (incidental flows, boundary flips); collapsing
+            # per dst_ip shows the verdict that matters instead of the spray.
+            df = (full.sort_values("confidence", ascending=False)
+                      .drop_duplicates("dst_ip", keep="first")
+                      .sort_values("time", ascending=False))
             df = df[["time", "attack_class", "confidence", "src_ip", "dst_ip",
                      "dpid", "packet_count"]]
             st.dataframe(
@@ -257,6 +265,16 @@ with placeholder.container():
                 use_container_width=True,
                 height=400,
             )
+            st.caption("One row per victim (its highest-confidence class). "
+                       "Expand below for every raw alert.")
+            with st.expander("Raw alert feed (all classes)"):
+                raw = full[["time", "attack_class", "confidence", "src_ip",
+                            "dst_ip", "dpid", "packet_count"]]
+                st.dataframe(
+                    raw.style.apply(highlight_severity, axis=1),
+                    use_container_width=True,
+                    height=300,
+                )
         else:
             st.info("No alerts yet - run an attack simulation from attacks/ "
                      "on the attacker host.")

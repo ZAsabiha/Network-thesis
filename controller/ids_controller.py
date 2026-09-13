@@ -9,8 +9,9 @@ Ryu application implementing the detection path of the thesis architecture:
 The machine-learning model is the ONLY detector. There are no thresholds, no
 rules and no heuristics deciding whether traffic is malicious - the single
 number that gates an alert is the model's own predicted probability
-(CONFIDENCE_THRESHOLD). This file also performs no mitigation: it classifies
-and reports, it never installs a blocking rule or rate-limits anything.
+(CONFIDENCE_THRESHOLD). Mitigation is a separate closed-loop step that runs
+only AFTER the model has raised an alert: the attacker's MAC is blocked with a
+timed DROP flow (see the MITIGATION block below).
 
 RUN:
   ryu-manager controller/ids_controller.py
@@ -73,6 +74,13 @@ ALERT_COOLDOWN_SEC = 10
 
 NORMAL_CLASS = "Normal"
 
+# Flow entries below this many packets carry almost no signal: ARP replies,
+# a single ICMP ping, a reverse-direction TCP ACK. The model classifies them
+# anyway and scatters them across Probe/Web-Attack/Botnet/BFA, burying the real
+# verdict in noise. Skip them before inference. Kept deliberately low so a
+# genuine flood (thousands of packets per entry) is never touched.
+MIN_CLASSIFY_PACKETS = 5
+
 # ----------------------------------------------------------------------------
 # MITIGATION. On an alert the controller pushes a high-priority DROP flow that
 # matches the attacker's MAC address, cutting them off in the data plane. MAC,
@@ -125,7 +133,7 @@ class IDSController(app_manager.RyuApp):
         self._load_model()
 
         self.monitor_thread = hub.spawn(self._monitor)
-    
+
     def _load_whitelist(self):
         """Server/victim MAC addresses that must never be blocked."""
         wl = set()
@@ -274,7 +282,7 @@ class IDSController(app_manager.RyuApp):
             ip = pkt.get_protocol(ipv4.ipv4)
             if ip is not None:
                 match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP,
-                                        eth_src=src, 
+                                        eth_src=src,
                                         ipv4_src=ip.src, ipv4_dst=ip.dst,
                                         ip_proto=ip.proto)
             else:
@@ -310,6 +318,18 @@ class IDSController(app_manager.RyuApp):
 
         if not vectors:
             return
+
+        # Drop low-signal entries before inference (see MIN_CLASSIFY_PACKETS).
+        # A destination under a spoofed fan-in is kept even when each forged
+        # source sent only a packet or two, so DDoS detection is unaffected.
+        kept = [(v, i) for v, i in zip(vectors, infos)
+                if i["packet_count"] >= MIN_CLASSIFY_PACKETS
+                or i["distinct_srcs_to_dst"] >= 3]
+        if not kept:
+            return
+        vectors = [v for v, _ in kept]
+        infos = [i for _, i in kept]
+
         self.flows_seen += len(vectors)
 
         # One predict_proba for the whole reply. Calling the model per flow
@@ -327,14 +347,11 @@ class IDSController(app_manager.RyuApp):
         per_flow_ms = elapsed_ms / len(vectors)
         self.latency_ms.append(per_flow_ms)
 
-        # Group the flagged flows by victim and class before reporting. A
-        # spoofed flood is one attack spread over thousands of forged sources,
-        # and each of those is its own flow entry - alerting per entry would
-        # write 300 rows for one hping3 --rand-source run and bury the feed.
-        # This is reporting only: the model has already classified every flow
+        # Reporting only: the model has already classified every flow
         # individually, nothing here decides whether traffic is malicious.
+        # First pass - keep the flows the model flagged above threshold.
         classes = self.model.classes_
-        flagged = {}
+        flagged = []
         for row, info in zip(proba, infos):
             # A whitelisted server (its replies/backscatter) is never the
             # attacker - don't raise alerts for traffic it originates.
@@ -344,15 +361,39 @@ class IDSController(app_manager.RyuApp):
             predicted, confidence = str(classes[idx]), float(row[idx])
             if predicted == NORMAL_CLASS or confidence < CONFIDENCE_THRESHOLD:
                 continue
-            flagged.setdefault((info["dst_ip"], predicted), []).append((info, confidence))
-        
-        for (dst_ip, predicted), items in flagged.items():
-            # Report the worst-offending flow as the representative, and say how
-            # many distinct sources joined in.
-            info, confidence = max(items, key=lambda t: t[1])
-            sources = {i["src_ip"] for i, _ in items}
-            packets = sum(i["packet_count"] for i, _ in items)
-            byts = sum(i["byte_count"] for i, _ in items)
+            flagged.append((info, predicted, confidence))
+
+        # Drop reverse-direction flows. A host that is itself under attack
+        # answers back, and those replies get scored as their own (usually
+        # bogus) attack - e.g. a flooded victim's return traffic reads as
+        # Probe. Any flagged flow whose SOURCE is some other flow's victim is
+        # that victim's own outbound traffic, so we suppress it. Caveat: if a
+        # single host is both attacked and attacking (A<->B both flagged, or a
+        # compromised victim attacking onward), its outbound attack is dropped
+        # too; that trade favours a clean feed over that rare case.
+        victims = {info["dst_ip"] for info, _, _ in flagged}
+        flagged = [(info, predicted, confidence)
+                   for info, predicted, confidence in flagged
+                   if info["src_ip"] not in victims]
+
+        # One verdict per victim. A spoofed flood is one attack spread over
+        # thousands of forged sources, and a mixed episode produces flows the
+        # model reads as several classes; alerting per (source, class) would
+        # bury the feed. Collapse every flagged flow aimed at the same
+        # destination into a single alert and let the highest-confidence flow
+        # name the class.
+        by_victim = {}
+        for info, predicted, confidence in flagged:
+            by_victim.setdefault(info["dst_ip"], []).append((info, predicted, confidence))
+
+        for dst_ip, items in by_victim.items():
+            # The highest-confidence flow is the representative: it names the
+            # class and its source leads the alert. Counts sum across the
+            # victim's flows so srcs/pkts/bytes describe the whole episode.
+            info, predicted, confidence = max(items, key=lambda t: t[2])
+            sources = {i["src_ip"] for i, _, _ in items}
+            packets = sum(i["packet_count"] for i, _, _ in items)
+            byts = sum(i["byte_count"] for i, _, _ in items)
 
             if not self._should_alert(dpid, info, predicted):
                 continue
@@ -367,7 +408,7 @@ class IDSController(app_manager.RyuApp):
             self._post_alert(predicted, confidence, info, dpid, per_flow_ms,
                              packets, byts, len(sources))
             # Closed-loop response: block the attacker, don't just report it.
-            self._mitigate(predicted, dst_ip, [i for i, _ in items], dpid)
+            self._mitigate(predicted, dst_ip, [i for i, _, _ in items], dpid)
 
         if self.flows_seen and self.latency_ms:
             avg = sum(self.latency_ms) / len(self.latency_ms)
@@ -377,8 +418,14 @@ class IDSController(app_manager.RyuApp):
     def _should_alert(self, dpid, info, attack_class):
         """
         Suppress repeat alerts while the same attack is still in progress.
-        Keyed on the VICTIM (not the switch), so one attack that crosses
-        several switches raises ONE alert, not one per switch.
+
+        Keyed on the VICTIM, not the source: a spoofed flood presents a fresh
+        forged source on every poll, so a source-keyed cooldown never matches
+        and suppresses nothing. ip_proto stays in the key because a host
+        running a SYN flood and a UDP flood at the same victim is two attacks,
+        and the second should not be swallowed as a duplicate of the first.
+        The switch (dpid) is deliberately NOT in the key, so one attack that
+        crosses several switches raises ONE alert, not one per switch.
         """
         key = (info["dst_ip"], info["ip_proto"], attack_class)
         now = time.time()
@@ -386,6 +433,7 @@ class IDSController(app_manager.RyuApp):
             return False
         self.last_alert_at[key] = now
         return True
+
     # ------------------------------------------------------------------
     def _post_alert(self, predicted, confidence, info, dpid, inference_ms,
                     packet_count=None, byte_count=None, source_count=1):
@@ -413,7 +461,7 @@ class IDSController(app_manager.RyuApp):
         except requests.exceptions.RequestException:
             self.logger.debug("Backend unreachable - alert logged locally only")
 
-        # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # Mitigation: block the attacker's MAC for a class-dependent lease
     # ------------------------------------------------------------------
     def _mitigate(self, attack_class, dst_ip, infos, dpid):
@@ -492,7 +540,7 @@ class IDSController(app_manager.RyuApp):
             requests.post(f"{BACKEND_URL}/mitigations", json=payload, timeout=1)
         except requests.exceptions.RequestException:
             self.logger.debug("Backend unreachable - mitigation logged locally only")
-    
+
     def _poll_manual_blocks(self):
         """Apply block requests made from the dashboard."""
         try:

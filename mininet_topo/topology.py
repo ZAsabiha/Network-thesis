@@ -52,6 +52,7 @@ import argparse
 import json
 import os
 
+from mininet.clean import cleanup as mn_cleanup
 from mininet.cli import CLI
 from mininet.link import TCLink
 from mininet.log import info, setLogLevel
@@ -261,6 +262,17 @@ def _reprofile_links(net, topo):
 
 
 def build_net(args):
+    # Mininet builds links with fast=True, i.e. makeIntfPair(deleteIntfs=False):
+    # it does NOT remove interfaces left over from a previous run. If a run
+    # crashed (or was killed) mid-build, stale veths/bridges/namespaces survive,
+    # and the next "ip link add name cs1-eth1 type veth ..." fails with
+    # "RTNETLINK answers: File exists". Mininet reports that as
+    #   Exception: Error creating interface pair (...): RTNETLINK answers: File exists
+    # thrown from net.build() the instant it starts "*** Adding links:". Wiping
+    # stale state first (equivalent to `sudo mn -c`) makes every run repeatable.
+    if not args.no_clean:
+        mn_cleanup()
+
     topo = DCTopo(mode=args.mode, pods=args.pods,
                   edges_per_pod=args.edges_per_pod,
                   hosts_per_edge=args.hosts_per_edge, k=args.k,
@@ -393,6 +405,9 @@ def parse_args():
                    help="do not auto-start web/dns/db services")
     p.add_argument("--traffic", action="store_true",
                    help="generate benign background traffic on client hosts")
+    p.add_argument("--no-clean", action="store_true",
+                   help="skip the automatic `mn -c` cleanup of stale state "
+                        "before building (only if you know none is left over)")
     p.set_defaults(services=True)
     return p.parse_args()
 

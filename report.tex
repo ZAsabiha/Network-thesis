@@ -1,0 +1,597 @@
+\documentclass[11pt]{article}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{array}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+
+\title{A Software-Defined Network Intrusion Detection System:\\
+Deployment-Aligned Random Forest Classification on InSDN and\\
+Live ML Detection in Mininet/Ryu}
+\author{[Your Name] \\ [Course Code] --- [Institution]}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We present a software-defined network (SDN) intrusion detection system in which a
+single machine-learning classifier is both trained offline on the InSDN dataset and
+deployed as the sole live detector inside a Ryu controller monitoring a multi-switch
+Mininet testbed. The classifier reaches 98.6\% accuracy and 0.988 weighted-F1 on seven
+traffic classes; macro-F1 is 0.681, and the gap between the two averages is the report's
+central quantitative finding. It is driven by three minority classes: Web-Attack and BFA
+sit near F1 0.38 and Botnet at 0.58, because seven-hundred-odd flow entries cannot be
+separated from benign traffic on volumetric features alone. The system's design
+contribution is the alignment of training and inference. Rather than training on raw
+CICFlowMeter micro-flows, the pipeline re-aggregates the dataset into the unidirectional
+flow-table entries a controller actually polls, encodes protocols as raw IANA numbers on
+both sides, drops byte-derived features that leak the label on InSDN, and adds four
+destination-context (fan-in / fan-out) features so that spoofed-source floods --- which
+are invisible per flow --- become learnable. The saved artifact is a
+\texttt{Pipeline(StandardScaler, RandomForest)}, so no preprocessing is lost at
+inference. On the live testbed the model raised 120 alerts against a single hping3 run,
+correctly identifying the attacker and victim. We also state the boundaries plainly:
+single-source floods faster than InSDN's benign traffic ceiling read as normal by
+construction, U2R was too rare to train, and control-plane saturation is undetectable
+because it prevents flow entries from ever forming.
+\end{abstract}
+
+\section{Introduction and Problem Statement}
+Software-defined networking separates the control plane from the data plane, giving a
+central controller a global view of network state. That same centralization introduces
+an attack surface absent from traditional networks: the controller itself. An intrusion
+detection system for SDN must therefore answer two questions that are usually treated
+separately --- whether a classifier can distinguish attack traffic from benign traffic,
+and whether the features that classifier needs are actually obtainable, and mean the same
+thing, when computed from the controller at runtime.
+
+Most reported SDN-IDS work answers only the first. A classifier is trained on a public
+flow dataset, high accuracy is reported, and the deployment question is left implicit.
+This report treats both, because an earlier iteration of this very system exhibited the
+classic failure: a Random Forest that scored well on held-out InSDN rows and labelled
+every live flow \texttt{Normal}. The features had the same names on both sides and
+different distributions. The core of the work described here is the set of changes that
+closed that gap, so that one trained model serves as the live detector rather than a
+second, hand-written detector standing in for it.
+
+\paragraph{Research questions.}
+\begin{enumerate}
+    \item \textbf{RQ1:} How well does a Random Forest trained on InSDN detect each
+    traffic class once class imbalance is measured rather than averaged away?
+    \item \textbf{RQ2:} What preprocessing is required for a model trained on an offline
+    flow dataset to remain usable on live controller observations --- and which of those
+    steps actually move the result?
+    \item \textbf{RQ3:} Does the trained model transfer to a live Ryu/Mininet deployment,
+    and what is detectable in practice versus undetectable by construction?
+\end{enumerate}
+
+\section{System Architecture}
+The system is a single pipeline of seven source components. Detection is performed by the
+machine-learning model alone: the controller computes a feature vector per flow entry,
+scores it with the model, and raises an alert when the winning class is not
+\texttt{Normal} and its probability clears a confidence threshold. There are no
+hand-written threshold rules on the live path.
+
+\begin{table}[h]
+\centering
+\caption{System components and responsibilities.}
+\label{tab:components}
+\small
+\begin{tabular}{p{3.2cm}p{3.1cm}p{7.3cm}}
+\toprule
+Component & File & Responsibility \\
+\midrule
+Emulated network & \texttt{mininet\_topo/} \texttt{topology.py}, \texttt{traffic.py} &
+Parametrized 3-tier tree (default: 1 core, 2 aggregation, 4 edge switches; 12 hosts;
+role-based IPs) on heterogeneous \texttt{TCLink}s; optional benign background traffic \\
+Controller & \texttt{controller/} \texttt{ids\_controller.py} & Ryu application: L2
+learning switch with IP-aware flow installation, flow-stats polling every 3\,s, batched
+model inference, alert dispatch \\
+Feature extraction & \texttt{controller/} \texttt{feature\_extractor.py} & Converts one
+\texttt{OFPFlowStatsReply} into feature vectors using the shared contract, including
+per-batch fan-in / fan-out counts \\
+Shared contract & \texttt{model/} \texttt{feature\_config.py} & Single definition of the
+feature vector, imported by both training and the live extractor \\
+Model + training & \texttt{model/} \texttt{train\_model.py} & Flow-entry emulation,
+leakage checks, Random Forest pipeline, deployment parity check \\
+Alert store & \texttt{backend/main.py}, \texttt{backend/database.py} & FastAPI service
+over SQLite; records each alert with the model's class and confidence \\
+Visualisation & \texttt{dashboard/} \texttt{streamlit\_app.py}, \texttt{topology\_view.py}
+& Polls the backend, draws the live topology and lights up attacker and victim \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{The shared feature contract}
+\label{sec:features}
+A single module, \texttt{model/feature\_config.py}, defines the feature vector through one
+function, \texttt{build\_feature\_vector()}, which is called identically by the training
+script and by the live extractor. The vector's shape, order, and meaning therefore cannot
+drift between training and inference by construction; a unit test asserts the live vector
+is byte-for-byte the training vector for the same counters.
+
+The contract defines eleven candidate features in a fixed order
+(Table~\ref{tab:featurelist}), of which the deployed model uses eight. Three byte-derived
+features are dropped at training time (Section~\ref{sec:preproc}). Host- and
+application-level features common in older datasets (failed-login counts, TCP-flag
+statistics) are deliberately excluded: a Ryu controller cannot compute them from flow
+statistics, so a model depending on them would be untrainable in this deployment.
+
+\begin{table}[h]
+\centering
+\caption{The feature contract. The deployed model uses the eight features not marked
+``dropped''; byte-derived features are removed because InSDN does not record byte counts
+for attack traffic (Section~\ref{sec:preproc}).}
+\label{tab:featurelist}
+\begin{tabular}{llp{6.6cm}}
+\toprule
+\# & Feature & Definition \\
+\midrule
+1 & \texttt{duration\_sec} & Flow-entry lifetime in seconds (floored at 0.001) \\
+2 & \texttt{packet\_count} & Packets matched by the flow entry \\
+3 & \texttt{byte\_count} & Bytes matched by the flow entry \emph{(dropped)} \\
+4 & \texttt{avg\_packet\_size} & \texttt{byte\_count} / \texttt{packet\_count}
+\emph{(dropped)} \\
+5 & \texttt{packet\_rate} & \texttt{packet\_count} / \texttt{duration\_sec} (pps) \\
+6 & \texttt{byte\_rate} & \texttt{byte\_count} / \texttt{duration\_sec} \emph{(dropped)} \\
+7 & \texttt{protocol} & Raw IANA number: 1\,=\,ICMP, 6\,=\,TCP, 17\,=\,UDP, 0\,=\,other \\
+8 & \texttt{flows\_to\_dst} & Flow entries in this reply aimed at the same destination \\
+9 & \texttt{distinct\_srcs\_to\_dst} & Distinct sources aimed at the same destination
+(fan-in) \\
+10 & \texttt{flows\_from\_src} & Flow entries in this reply out of the same source \\
+11 & \texttt{distinct\_dsts\_from\_src} & Distinct destinations from that source (fan-out) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The protocol encoding is a deliberate design point. Both OpenFlow's \texttt{ip\_proto}
+match field and InSDN's \texttt{Protocol} column are already IANA numbers, so both sides
+use them as-is. An earlier build compacted them to $0/1/2$ on the controller side only,
+so every TCP flow reached the forest tagged as protocol $0$ (``unknown'') and was routed
+down the wrong branch at every protocol split. A unit test now pins the IANA encoding.
+
+The four destination-context features (8--11) are the design's answer to spoofed-source
+floods. InSDN's DDoS traffic forges a distinct source per packet, so each forged source
+produces its own flow entry carrying about two packets; on the seven per-flow features
+alone, the median DDoS entry is statistically indistinguishable from an idle benign flow,
+because it genuinely is one. The attack exists only in the aggregate: one destination
+fielding flows from thousands of sources. The fan-in and fan-out counts, computed across
+one \texttt{FlowStatsReply}, are exactly the scope the controller has at runtime and make
+that aggregate learnable. They remain model features, not thresholds: nothing here decides
+``malicious'' on its own.
+
+\section{Dataset and Preprocessing}
+
+\subsection{Source}
+InSDN~\cite{insdn} comprises three CSV exports --- normal traffic
+(\texttt{Normal\_data.csv}), Metasploitable-target attack traffic
+(\texttt{metasploitable-2.csv}), and OVS-collected traffic (\texttt{OVS.csv}) --- each
+with 84 CICFlowMeter columns. Concatenated, they total 343,889 flow records.
+
+\subsection{Label consolidation}
+Raw labels are normalised to lowercase and mapped to classes by substring matching, with
+\texttt{ddos} tested before \texttt{dos} since the latter is a substring of the former.
+Two data-quality artifacts surface and are worth recording: the raw \texttt{Label} column
+carries \texttt{DDoS} under two distinct strings (73,529 and 48,413 records), and Botnet
+is written \texttt{BOTNET}. After consolidation no record falls through to
+\texttt{Unknown}. The raw class distribution (Table~\ref{tab:dist}) spans an imbalance
+ratio of 7,173:1 between the largest and smallest class.
+
+\begin{table}[h]
+\centering
+\caption{Raw class distribution after label consolidation, before flow-entry emulation.}
+\label{tab:dist}
+\begin{tabular}{lrr}
+\toprule
+Class & Records & Share \\
+\midrule
+DDoS & 121{,}942 & 35.5\% \\
+Probe & 98{,}129 & 28.5\% \\
+Normal & 68{,}424 & 19.9\% \\
+DoS & 53{,}616 & 15.6\% \\
+BFA & 1{,}405 & 0.41\% \\
+Web-Attack & 192 & 0.06\% \\
+Botnet & 164 & 0.05\% \\
+U2R & 17 & 0.005\% \\
+\midrule
+Total & 343{,}889 & 100\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Flow-entry emulation: aligning training with inference}
+\label{sec:emulation}
+The pipeline does not train on raw CICFlowMeter rows. CICFlowMeter cuts a packet capture
+into short bidirectional micro-flows, so a flood appears as tens of thousands of two-packet
+rows lasting milliseconds. An OpenFlow flow-table entry is the opposite: one
+unidirectional entry per (\texttt{ipv4\_src}, \texttt{ipv4\_dst}, \texttt{ip\_proto}) that
+accumulates every matching packet for its whole lifetime, so the same flood is one entry
+of tens of thousands of packets over seconds. Same column names, opposite distributions.
+
+\texttt{emulate\_flow\_table\_entries()} re-aggregates the dataset into controller-shaped
+entries before any training. It attributes each flow's counters to its
+source--destination key, tiles time into windows equal to the controller's flow-entry
+lifetime, and emits several samples per entry at evenly spaced poll times, each carrying
+the counters accumulated so far and a duration equal to the entry's age at that poll. This
+reproduces the 0--10\,s duration range and the cumulative counters the controller reports,
+and it doubles as honest augmentation: the model sees each attack both early and fully
+developed. Two dataset-specific complications are handled explicitly:
+
+\begin{itemize}
+    \item \textbf{Unreliable direction fields.} \texttt{Tot Fwd Pkts} is zero for 100\% of
+    DDoS rows and 56\% of rows overall, with every packet booked as ``backward'' even
+    though the row is keyed source-to-destination. Splitting on those fields would delete
+    the forward half of every flood and turn the attack's fan-in into a fan-out, making
+    the victim look like the attacker. When the fields look broken, the total counters are
+    attributed to the source-to-destination key instead.
+    \item \textbf{Truncated timestamps.} 75\% of timestamps are minute-truncated (the
+    seconds field is absent), so rows sharing a truncated timestamp are spread uniformly
+    across the interval it represents, in capture order. The spreading is class-agnostic,
+    so it does not leak the label; the limitation is up to 60\,s of duration error, which
+    makes results sensitive to the chosen flow-timeout.
+\end{itemize}
+
+Emulation turns 343,889 records into 301,603 flow-table entries.
+
+\subsection{Byte-feature leakage and downsampling}
+\label{sec:preproc}
+A byte-counter leakage check runs on the emulated entries. On InSDN the byte count is zero
+for 99.6\% of DDoS entries, 72.7\% of Probe entries, and roughly half of BFA, Botnet and
+Web-Attack entries, against 23.7\% for Normal. ``The exporter wrote no byte count'' is
+therefore very nearly a label, and any byte-derived feature would let the model score well
+offline while collapsing on a live testbed where a real switch does count bytes. The three
+byte-derived features are dropped, leaving the eight features of Table~\ref{tab:featurelist}.
+
+Two further steps handle the raw imbalance. The dominant class after emulation, spoofed
+DDoS, produces 243,886 entries (one per forged source) and is downsampled to 60,000. U2R,
+with only 51 emulated entries, falls below the 100-entry minimum and is dropped: seven
+volumetric features cannot learn it, and it only corrupts the macro averages. The
+resulting seven-class training set is summarised in Table~\ref{tab:entrycounts}.
+
+\begin{table}[h]
+\centering
+\caption{Emulated flow-table entries, before and after downsampling / minimum-count
+dropping. U2R is dropped; DDoS is capped at 60{,}000.}
+\label{tab:entrycounts}
+\begin{tabular}{lrr}
+\toprule
+Class & Emulated entries & After preparation \\
+\midrule
+DDoS & 243{,}886 & 60{,}000 \\
+Normal & 55{,}550 & 55{,}550 \\
+Probe & 1{,}161 & 1{,}161 \\
+DoS & 414 & 414 \\
+BFA & 267 & 267 \\
+Botnet & 165 & 165 \\
+Web-Attack & 109 & 109 \\
+U2R & 51 & \emph{dropped} \\
+\midrule
+Total & 301{,}603 & 117{,}666 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Model and Training}
+The prepared entries are split 75/25 with stratification, giving 88,249 training and
+29,417 test entries. The classifier is a \texttt{Pipeline(StandardScaler,
+RandomForestClassifier)} with 150 trees, \texttt{max\_depth=20},
+\texttt{class\_weight="balanced"}, and a fixed seed. Saving a pipeline rather than a bare
+estimator is deliberate: it guarantees that whatever preprocessing training applied is
+carried to inference inside the same artifact. The scaler is a no-op for a scale-invariant
+forest, but its presence means a later swap to an SVM or MLP cannot reintroduce the
+``where did the scaler go'' defect.
+
+Random Forest suits these features for two reasons. First, feature magnitudes span several
+orders (packet counts in the tens of thousands against a protocol code in a small integer
+range); a tree ensemble splits each feature on its own scale. Second, the ensemble yields
+per-feature importances (Table~\ref{tab:importance}), so a flagged flow can be explained.
+Consistent with the design intent, the two rate/count features and duration carry the most
+weight, but the four destination-context features together account for about 36\% of total
+importance --- confirming that the fan-in / fan-out signal is doing real work, not padding.
+
+\begin{table}[h]
+\centering
+\caption{Random Forest feature importances (deployed eight-feature model).}
+\label{tab:importance}
+\begin{tabular}{lr}
+\toprule
+Feature & Importance \\
+\midrule
+\texttt{packet\_rate} & 0.233 \\
+\texttt{packet\_count} & 0.206 \\
+\texttt{duration\_sec} & 0.131 \\
+\texttt{distinct\_srcs\_to\_dst} & 0.109 \\
+\texttt{flows\_to\_dst} & 0.105 \\
+\texttt{distinct\_dsts\_from\_src} & 0.078 \\
+\texttt{flows\_from\_src} & 0.071 \\
+\texttt{protocol} & 0.067 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Deployment parity check}
+Before saving, training refuses to ship a model that cannot see an obvious attack. It
+builds feature vectors at live counter scale --- exactly what the controller produces from
+an hping3 flood --- through the same \texttt{build\_feature\_vector()} and asserts they are
+not all classified \texttt{Normal}, and that benign probes are not all flagged. This is a
+guard against train/serve skew that a test split cannot catch, because the test split
+contains no live-scale flood. Its verdicts are recorded in the model metadata and are the
+honest basis for the coverage discussion in Section~\ref{sec:live}.
+
+\section{Experiment 1: Per-Class Performance}
+\label{sec:perclass}
+
+\begin{table}[h]
+\centering
+\caption{Per-class results on the held-out set ($n = 29{,}417$).}
+\label{tab:perclass}
+\begin{tabular}{lrrrr}
+\toprule
+Class & Precision & Recall & F1 & Support \\
+\midrule
+DDoS & 1.00 & 1.00 & 1.00 & 15{,}000 \\
+Normal & 0.99 & 0.98 & 0.99 & 13{,}888 \\
+Probe & 0.77 & 0.89 & 0.82 & 290 \\
+DoS & 0.61 & 0.62 & 0.61 & 104 \\
+Botnet & 0.45 & 0.83 & 0.58 & 41 \\
+BFA & 0.28 & 0.58 & 0.38 & 67 \\
+Web-Attack & 0.32 & 0.48 & 0.38 & 27 \\
+\midrule
+Accuracy & & & 0.986 & 29{,}417 \\
+Macro avg & 0.63 & 0.77 & 0.68 & \\
+Weighted avg & 0.99 & 0.99 & 0.99 & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Why the headline number misleads}
+Accuracy 0.986 and weighted-F1 0.988 are dominated by DDoS and Normal, which together hold
+98.2\% of the test set. Macro-F1 weights all seven classes equally and returns 0.681. The
+0.31 spread between weighted- and macro-F1 measures how much of the system's apparent
+competence is concentrated in the two classes it was given tens of thousands of examples
+of. Reporting both numbers, and explaining the gap, is the substantive finding of this
+section. The high-volume classes are separated cleanly: DDoS reaches F1 1.00 (the
+destination-context features resolving the spoofed flood), Normal 0.99, and Probe 0.82.
+The three small classes carry the macro average down.
+
+\subsection{The minority classes}
+BFA (67 test entries, F1 0.38), Web-Attack (27, 0.38), and Botnet (41, 0.58) are the weak
+points. Two causes compound. First, sample count: after emulation and the byte-feature
+drop, each is represented by a few hundred entries at most, so \texttt{class\_weight}
+pushes the boundary toward them and produces the characteristic high-recall,
+low-precision signature (Botnet recall 0.83 at precision 0.45). Second, feature overlap:
+a web attack is a small number of TCP flows and a brute-force attempt is steady
+moderate-rate TCP, neither of which is volumetrically distinct from ordinary traffic once
+payload is unobservable. The confusion matrix (Table~\ref{tab:cm}) shows the leakage is
+mutual and mostly into and out of Normal, not a single dominating off-diagonal cell.
+
+\begin{table}[h]
+\centering
+\caption{Confusion matrix. Rows are true classes, columns predicted.}
+\label{tab:cm}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{l|rrrrrrr}
+\toprule
+True $\backslash$ Pred & BFA & Botnet & DDoS & DoS & Normal & Probe & Web-Att. \\
+\midrule
+BFA        & 39 & 0  & 0      & 3      & 18      & 4     & 3  \\
+Botnet     & 0  & 34 & 0      & 0      & 7       & 0     & 0  \\
+DDoS       & 0  & 0  & 14{,}979 & 0    & 21      & 0     & 0  \\
+DoS        & 2  & 0  & 0      & 64     & 30      & 8     & 0  \\
+Normal     & 90 & 42 & 6      & 35     & 13{,}626 & 66   & 23 \\
+Probe      & 1  & 0  & 0      & 3      & 26      & 258   & 2  \\
+Web-Attack & 5  & 0  & 0      & 0      & 8       & 1     & 13 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{False-positive rate and the confidence threshold}
+Because an IDS that cries wolf gets switched off, the false-positive rate --- benign flows
+on which an alert fired --- matters operationally more than accuracy. At the deployed
+confidence threshold of 0.60, the overall false-positive rate is 1.2\% at a detection
+recall of 0.99. Table~\ref{tab:sweep} sweeps the threshold that
+\texttt{ids\_controller.py} applies at runtime, and justifies the chosen value rather than
+asserting it: raising it to 0.70 cuts the false-positive rate to 0.4\% for one point of
+recall, and 0.60 is the knee of that trade-off.
+
+\begin{table}[h]
+\centering
+\caption{Confidence-threshold sweep. Rows below the threshold are reported \texttt{Normal},
+exactly as the controller does. The deployed value is 0.60.}
+\label{tab:sweep}
+\begin{tabular}{rrrrr}
+\toprule
+Threshold & Detection recall & False-positive rate & Precision & Accuracy \\
+\midrule
+0.00 & 0.9929 & 0.0189 & 0.9833 & 0.9863 \\
+0.50 & 0.9920 & 0.0179 & 0.9841 & 0.9865 \\
+\textbf{0.60} & \textbf{0.9904} & \textbf{0.0122} & \textbf{0.9891} & \textbf{0.9887} \\
+0.70 & 0.9876 & 0.0037 & 0.9967 & 0.9915 \\
+0.90 & 0.9826 & 0.0006 & 0.9994 & 0.9904 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Inference latency}
+Model inference is measured the way the controller calls it. A single-flow
+\texttt{predict\_proba} averages about 56\,ms, dominated by fixed scikit-learn overhead;
+scoring a whole \texttt{FlowStatsReply} in one call amortises that to roughly 0.6\,ms per
+flow at a batch of 128. The controller uses the batched path, which is why classification
+stays comfortably inside the 3-second poll interval. End-to-end detection latency is
+dominated by the poll interval, not by inference.
+
+\section{Experiment 2: What Preprocessing Actually Matters}
+RQ2 asks which preprocessing steps are load-bearing. The evidence is qualitative but
+decisive, because several steps are the difference between a model that deploys and one
+that does not, rather than a few points of F1.
+
+\begin{itemize}
+    \item \textbf{Flow-entry emulation is necessary for deployment, not accuracy.} The
+    pre-emulation model scored about 0.93 offline and labelled every live flow
+    \texttt{Normal}, because its decision structure lived entirely in the sub-second
+    duration regime that a controller never produces. Emulation (Section~\ref{sec:emulation})
+    is what makes the offline and live distributions the same object.
+    \item \textbf{Destination-context features are necessary for spoofed DDoS.} Without
+    them the model cannot represent a spoofed flood at all, since the signal lives in the
+    fan-in / fan-out counts and not in any single flow. With them, DDoS reaches F1 1.00.
+    An ablation flag (\texttt{-{}-no-context-features}) reproduces the failing configuration
+    for comparison.
+    \item \textbf{Dropping byte features is necessary for honesty.} Keeping them lifts
+    offline scores toward 1.00 by leaking the capture artifact of a missing byte count,
+    and produces a model that cannot see a live flood. The pipeline drops them
+    automatically when the leakage check trips.
+    \item \textbf{The IANA protocol encoding and the pipeline-saved scaler} are each
+    necessary correctness fixes; getting either wrong silently routes every flow to the
+    wrong answer at inference time.
+\end{itemize}
+
+In short, the minority-class weakness in Section~\ref{sec:perclass} is a genuine
+data-and-feature-space limit, whereas the deployment failure of the earlier model was a
+train/serve alignment problem that preprocessing solved outright.
+
+\section{The Live Detection Path}
+\label{sec:live}
+The trained model is the live detector. The controller installs one unidirectional flow
+entry per (source, destination, protocol) with a 10-second hard timeout --- matching the
+flow-timeout the model was trained on --- polls flow statistics every 3\,s, builds the
+feature vectors for the whole reply through the shared extractor, scores them in one
+batched call, and raises an alert when the winning class is not \texttt{Normal} and its
+probability clears 0.60. A per-victim cooldown suppresses repeat alerts so one sustained
+attack does not bury the feed. The controller performs no mitigation: it classifies and
+reports.
+
+A legacy threshold detector (\texttt{controller/detector.py}) remains in the repository
+from the earlier build but is not imported by the controller and plays no part in live
+detection; it is noted here only so its presence is not mistaken for a second active path.
+
+\subsection{Live testbed results}
+Against a single hping3 SYN-flood run from attacker host \texttt{h6} (10.1.2.3) to the web
+server \texttt{h1} (10.1.1.1), the model raised 120 alerts over about seven minutes,
+recorded in the backend database. The breakdown is 86 DoS and 34 Probe alerts, with
+confidences from 0.62 to 0.95, and a mean live inference time of 8.5\,ms per flow. The
+alerts correctly name the attacker as source and the victim as destination, and appear
+across the edge and aggregation switches on the path. The average packet size in these
+alerts is 54--58 bytes, consistent with the near-empty packets of a SYN flood. A handful
+of early alerts carry MAC addresses in place of IPs, from flows seen before the switch had
+learned the hosts; these are cosmetic and clear once L2 learning completes.
+
+\subsection{What is detectable, and what is not}
+The offline deployment-parity check and the live run together bound what the system can
+see. The model detects spoofed DDoS (via the context features), normal traffic (correctly
+silent), and floods whose rate falls within the range InSDN's DoS traffic covers --- which
+is where the Mininet testbed's link-limited hping3 floods landed, hence the 120 live DoS
+and Probe alerts. It does \emph{not} detect single-source floods faster than InSDN's
+benign ceiling: the parity check shows a 30{,}000-packet, 3-second SYN flood classified
+\texttt{Normal} at confidence 0.59, because InSDN's benign bulk transfers reach 311{,}000
+pps while its DoS traffic tops out around 6{,}555 pps, so at the highest flood rates the
+training data itself says ``Normal''. This is a dataset limit, recorded in the model
+metadata as an uncovered shape, and it is honest to report it rather than hide it behind
+the aggregate accuracy.
+
+\section{Attack Taxonomy and Coverage}
+The simulated attacks, their tools, the InSDN classes they correspond to, and the live
+model output are reconciled in Table~\ref{tab:taxonomy}.
+
+\begin{table}[h]
+\centering
+\caption{Attack coverage across the testbed.}
+\label{tab:taxonomy}
+\small
+\begin{tabular}{p{2.9cm}p{2.6cm}p{2.3cm}p{5.0cm}}
+\toprule
+Simulated attack & Tool & InSDN class & Live model output \\
+\midrule
+SYN flood & \texttt{hping3 -S --flood} & DoS / DDoS & DoS (observed live), or DDoS when the
+context features see multiple sources \\
+UDP flood & \texttt{hping3 --udp --flood} & DoS / DDoS & DoS / DDoS by the same signal \\
+Port scan & \texttt{nmap -sS -p-} & Probe & Probe (observed live) \\
+Slowloris & \texttt{slowloris\_attack.py} & \emph{no clean analogue} & Low-and-slow is
+weakly represented in the volumetric features; not reliably distinguished \\
+Control-plane saturation & \texttt{control\_plane\_saturation.py} & \emph{absent from
+InSDN} & \emph{not detected by construction} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Control-plane saturation is outside the detection path by construction. The attack
+randomises source IP and MAC on every packet so that no flow-table entry ever matches,
+forcing a \texttt{PacketIn} per packet and targeting the controller's processing capacity
+rather than any host. The model has no training examples of it, because InSDN contains no
+such class, and the live detector cannot see it either, because detection operates on
+flow-statistics polling and the attack is designed to prevent flow entries from forming.
+Detecting it would require a \texttt{PacketIn} arrival-rate counter in the controller,
+independent of the flow-stats path --- instrumentation the system does not have.
+
+\section{Discussion}
+The result that generalises beyond this dataset is the alignment argument. A classifier's
+offline accuracy is evidence about deployability only when the features it consumes mean
+the same thing at inference time. Here that required re-deriving the training features from
+the shape the controller actually observes --- unidirectional, cumulative, IANA-encoded,
+byte-blind, and context-aware --- rather than from the exporter's native micro-flows. Once
+aligned, one model trained on a public dataset served as the live detector and produced
+correct attacker/victim attributions on a testbed it was never trained on.
+
+The minority-class weakness is the honest cost. Web-Attack, BFA, and Botnet cannot be
+separated from benign traffic on volumetric flow features, and no amount of reweighting
+recovers a signal that lives in packet payload the feature space never observes. The
+appropriate response is to scope the system's claims to the classes it can support ---
+high-volume floods, spoofed DDoS, and port scans --- and to report the minority F1 scores
+as the measured limits they are.
+
+\section{Limitations}
+\begin{enumerate}
+    \item \textbf{Minority classes are weak.} Web-Attack and BFA sit near F1 0.38 and
+    Botnet at 0.58, from a few hundred entries each and volumetric feature overlap
+    (Section~\ref{sec:perclass}).
+    \item \textbf{U2R is not modelled.} 17 raw records became 51 emulated entries, below
+    the training minimum, so the class was dropped rather than reported at a noise-level
+    metric.
+    \item \textbf{High-rate single-source floods above InSDN's benign ceiling read as
+    Normal.} A documented dataset gap, recorded in the model metadata; closing it requires
+    training on captured Mininet flow statistics.
+    \item \textbf{Control-plane saturation is undetectable by construction}, as it prevents
+    flow entries from forming and no independent \texttt{PacketIn} counter exists.
+    \item \textbf{Byte-derived features are unavailable} on InSDN because the dataset does
+    not record byte counts for attack traffic; the model runs on eight non-byte features.
+    \item \textbf{Timestamp reconstruction} introduces up to 60\,s of duration error, so
+    results are sensitive to the flow-timeout and should be reported with that sensitivity.
+    \item \textbf{Thresholds and topology are calibrated to this testbed} (a 12-host,
+    7-switch tree with mixed link profiles) and carry no claim of transfer to other scales
+    or link speeds.
+    \item \textbf{Fat-tree mode needs a loop-aware controller.} The current L2 learning
+    switch floods, so redundant paths would broadcast-storm; only the loop-free tree mode
+    is used for results.
+\end{enumerate}
+
+\section{Conclusion}
+A single Random Forest, trained on InSDN and deployed unchanged inside a Ryu controller,
+reaches 98.6\% accuracy and 0.988 weighted-F1 but 0.681 macro-F1; all three numbers belong
+in the same sentence, because the first two are carried by two large classes and the third
+records that three of seven are hard. The system's contribution is not the headline score
+but the alignment that makes it deployable: re-aggregating the dataset into
+controller-shaped flow entries, encoding protocols consistently, dropping features that
+leak a capture artifact, and adding destination-context features that turn an
+otherwise-invisible spoofed flood into a class with F1 1.00. On the live testbed the model
+raised 120 correctly attributed alerts against a real attack. Its boundaries are stated
+precisely: the rarest classes, the fastest single-source floods, and the attack most
+specific to SDN --- control-plane saturation --- lie outside what flow statistics can
+show. Stating those boundaries is what distinguishes a measured system from a
+demonstration.
+
+\begin{thebibliography}{9}
+\bibitem{insdn} Elsayed, M. S., Le-Khac, N.-A., Dev, S., \& Jurcut, A. D. (2020). InSDN:
+A Novel SDN Intrusion Dataset. \emph{IEEE Access}, 8, 165263--165284.
+\bibitem{rf} Breiman, L. (2001). Random Forests. \emph{Machine Learning}, 45(1), 5--32.
+\bibitem{ryu} Ryu SDN Framework Community. \emph{Ryu: Component-Based Software Defined
+Networking Framework}. \url{https://ryu-sdn.org}
+\bibitem{mininet} Lantz, B., Heller, B., \& McKeown, N. (2010). A Network in a Laptop:
+Rapid Prototyping for Software-Defined Networks. \emph{Proc. 9th ACM SIGCOMM Workshop on
+Hot Topics in Networks (HotNets)}.
+\bibitem{sklearn} Pedregosa, F. et al. (2011). Scikit-learn: Machine Learning in Python.
+\emph{Journal of Machine Learning Research}, 12, 2825--2830.
+\end{thebibliography}
+
+\end{document}

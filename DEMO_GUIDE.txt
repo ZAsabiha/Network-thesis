@@ -5,10 +5,9 @@
  Follow the terminals in order (1 -> 5), then run the attacks and watch the
  dashboard identify the attacker and victim in real time.
 
- IMPORTANT - the topology changed. It is no longer 1 switch / h1..h5 with
- victim 10.0.0.1. The new topology is a multi-switch tree with 12 hosts and
- role-based IPs. The correct victim and attacker hosts are listed below. Do
- NOT use "h5" or "10.0.0.1" - those were the old flat topology.
+ IMPORTANT - the topology is a multi-switch tree with 12 hosts and role-based
+ IPs. The victim is 10.1.1.1 (host h1) and the attackers are h6, h9, h12.
+ Do NOT use "h5" or "10.0.0.1" - those were an older flat topology.
 
 ------------------------------------------------------------------------------
  WHAT YOU ARE SHOWING (one-line architecture)
@@ -19,48 +18,52 @@
       the attacker (red) and the victim (orange) on the live topology map.
 
  Key point for the teacher: the ONLY thing that decides "attack" is the ML
- model's predicted probability. There are no hand-written threshold rules.
+ model's predicted probability. There are no hand-written threshold rules in
+ the live path. A flow is reported only when the model's confidence for an
+ attack class is at least 0.60; below that it is treated as Normal.
 
 
 ==============================================================================
  THE 5 TERMINALS
 ==============================================================================
 
- Open five terminals. Start them in this order and leave each one running.
+ Open five terminals. Start them STRICTLY in the order below and leave each
+ one running. The order matters: the topology (Terminal 2) must come before
+ the controller (Terminal 3), because the topology's startup cleanup runs
+ `killall ryu-manager` and will kill a controller that is already running.
 
  -------- TERMINAL 1 : BACKEND (alert store + REST API) --------
    cd /home/sabiha/sdn-te-project
    source venv/bin/activate
-   rm -f backend/ids_alerts.db         
+   rm -f backend/ids_alerts.db
    cd backend
-   uvicorn main:app --reload --port 8000
+   uvicorn main:app --port 8000
 
    Leave it running. It serves /alerts to the dashboard.
    NOTE: the database lives at backend/ids_alerts.db (not the project root),
    so that is the file to delete when you want a fresh start.
+   Do NOT use --reload: the backend wipes the alert feed every time it
+   restarts, and --reload restarts it on any code edit, erasing a live demo.
 
- -------- TERMINAL 2 : CLEAN UP ANY OLD MININET STATE --------
+ -------- TERMINAL 2 : MININET TOPOLOGY (the network) --------
    cd /home/sabiha/sdn-te-project
    sudo mn -c
-
-   Run this once before starting the topology. It clears leftover switches
-   and interfaces from any previous run. This terminal is then free.
-
- -------- TERMINAL 3 : RYU CONTROLLER (detection brain) --------
-   cd /home/sabiha/sdn-te-project
-   source venv/bin/activate
-   ryu-manager controller/ids_controller.py
-
-   Wait until it prints that it loaded the model and is listening. Start this
-   BEFORE the topology so the switches have a controller to connect to.
-
- -------- TERMINAL 4 : MININET TOPOLOGY (the network) --------
-   cd /home/sabiha/sdn-te-project
-   sudo python3 mininet_topo/topology.py
-
-   Optional, richer demo (adds legitimate background traffic so you can show
-   the IDS does NOT flag normal users):
    sudo python3 mininet_topo/topology.py --traffic
+
+   Run "sudo mn -c" FIRST, every time, then start the topology. The topology
+   also auto-cleans in-process before it builds, but that is not always enough
+   to clear leftover OVS bridges / veths between runs - if you skip the manual
+   "sudo mn -c" you can still hit a build error. Running it by hand first is
+   the reliable step. (To skip the in-process auto-clean, add --no-clean.)
+
+   Start this BEFORE the controller. Both "sudo mn -c" and the topology's
+   auto-clean run mininet's cleanup, which does `killall ryu-manager`. So
+   starting (or restarting) the topology KILLS any controller that is already
+   running. That is why the topology goes first. If you restart the topology
+   mid-session, you MUST restart the controller (Terminal 3) too.
+
+   --traffic adds legitimate background traffic on the client hosts, so you
+   can show the IDS does NOT flag normal users. Drop it for a quieter demo.
 
    When it finishes you land at the  mininet>  prompt. This is where you type
    the attack commands (see below). First, verify connectivity:
@@ -69,7 +72,25 @@
    Some pings across the "WAN" links may drop (those links have 2% loss on
    purpose) - that is expected. As long as most succeed, you are ready.
 
- -------- TERMINAL 5 : DASHBOARD (what the teacher watches) --------
+ -------- TERMINAL 3 : RYU CONTROLLER (detection brain) --------
+   cd /home/sabiha/sdn-te-project
+   source venv/bin/activate
+   ryu-manager --ofp-tcp-listen-port 6633 controller/ids_controller.py
+
+   Start this AFTER the topology (Terminal 2) is at the mininet> prompt. Open
+   vSwitch reconnects to the controller as soon as it is listening, so nothing
+   is lost by starting it second.
+
+   The port flag is REQUIRED. Ryu listens on 6653 by default, but the topology
+   connects to 6633 (mininet_topo/topology.py --controller-port). Without the
+   flag the switches never reach the controller and the dashboard shows no
+   attacks - the usual cause of "I ran the attacks but nothing is detected".
+
+   Wait until it prints that it loaded the model, lists the classes, and then
+   prints "Switch <id> connected" for each switch. Once those appear (and with
+   --traffic running) you should see [ALERT] lines within a few seconds.
+
+ -------- TERMINAL 4 : DASHBOARD (what the teacher watches) --------
    cd /home/sabiha/sdn-te-project
    source venv/bin/activate
    cd dashboard
@@ -77,6 +98,12 @@
 
    Open the URL it prints (usually http://localhost:8501). You will see the
    "Network Topology" map and the "Live Alert Feed". Point the teacher here.
+
+ -------- TERMINAL 5 : SPARE (watch the controller / run helpers) --------
+   Keep one terminal free. Use it to watch the controller's [ALERT] lines in
+   Terminal 3, or to re-read the host IPs:
+   cd /home/sabiha/sdn-te-project
+   cat mininet_topo/topology_state.json | python3 -m json.tool | less
 
 
 ==============================================================================
@@ -109,45 +136,90 @@
 
 
 ==============================================================================
- RUNNING THE ATTACKS  (type these at the mininet> prompt in TERMINAL 4)
+ RUNNING THE ATTACKS  (type these at the mininet> prompt in TERMINAL 2)
 ==============================================================================
- Each attack is launched FROM an attacker host (h6) AGAINST the victim web
- server (10.1.1.1). While it runs, switch to the dashboard: within a few
- seconds the attacker node turns RED, the victim turns ORANGE, and a red
- arrow labelled with the attack type appears between them.
+ Each attack is launched FROM an attacker host AGAINST the victim web server
+ (10.1.1.1). While it runs, switch to the dashboard: within a few seconds the
+ attacker node turns RED, the victim turns ORANGE, and a red arrow labelled
+ with the attack class appears between them.
+
+ The controller polls flow stats every 3 seconds, so allow up to ~5 seconds
+ after you start an attack before it shows on the dashboard.
 
  A "--flood" attack runs until you stop it. To stop it and get the mininet>
- prompt back, press  Ctrl+C  in Terminal 4.
+ prompt back, press  Ctrl+C  in Terminal 2.
 
- ---- 1) SYN FLOOD  (detected as DoS)  *** start with this one *** ----
+ -------- PART A : ATTACKS THE MODEL DETECTS --------
+ Present these first. Each one produces an alert the teacher can watch appear.
+
+ ---- 1) SYN FLOOD  ->  detected as DoS  *** start with this one *** ----
    mininet> h6 bash -c "cd attacks && ./syn_flood.sh 10.1.1.1"
 
-   Watch: h6 turns red, h1 (web) turns orange, arrow says "DoS".
+   Watch: h6 turns red, h1 (web) turns orange, arrow says "DoS" (~0.9 conf).
    Press Ctrl+C to stop.
 
- ---- 2) UDP FLOOD  (detected as DoS) ----
+ ---- 2) UDP FLOOD  ->  detected as DoS ----
    mininet> h6 bash -c "cd attacks && ./udp_flood.sh 10.1.1.1"
 
+   Same result as the SYN flood: a single high-rate flow the model calls DoS.
    Press Ctrl+C to stop.
 
- ---- 3) SLOWLORIS  (slow-rate / low-and-slow) ----
-   mininet> h6 bash -c "cd attacks && python3 slowloris_attack.py 10.1.1.1 --port 80 --sockets 100 --interval 10"
+ ---- 3) SPOOFED-SOURCE FLOOD  ->  detected as DDoS ----
+   mininet> h6 bash -c "sudo hping3 -S --flood --rand-source -p 80 10.1.1.1"
 
-   This one is quieter by design; give it 10-20 seconds. Press Ctrl+C to stop.
+   This is the DDoS case. Every packet uses a forged source IP, so the victim
+   fields flows from hundreds of distinct sources at once. That fan-in is what
+   the model reads as DDoS (~0.9 conf), not DoS. On the dashboard the alert
+   says DDoS and reports a high source count. Press Ctrl+C to stop.
 
- ---- 4) PORT SCAN  (detected as Probe) ----
+ -------- PART B : CORNER CASES / BLIND SPOTS --------
+ These are for the discussion, not the "it works" moment. A closed-set,
+ flow-based IDS has predictable gaps, and naming them is a stronger thesis
+ point than pretending they do not exist.
+
+ ---- 4) PORT SCAN  ->  reported as DoS, NOT Probe (explain why) ----
    mininet> h6 bash -c "cd attacks && ./port_scan.sh 10.1.1.1"
 
-   A full port scan takes a while; it stops on its own when finished.
+   Talking point: the switch installs one flow rule per (source, destination,
+   protocol) - it does NOT split on TCP port. So scanning every port of ONE
+   host collapses into a single high-rate TCP flow, which looks identical to a
+   flood and is reported as DoS. A scan only looks like "Probe" when it fans
+   out across many DIFFERENT hosts, which this dataset's Probe class needs and
+   a single-target port scan never produces. This is a limitation of flow-stat
+   granularity, not a tuning mistake.
 
- ---- OPTIONAL: DISTRIBUTED DDoS (all three attackers at once) ----
- This is the strongest visual: three red nodes all pointing at one victim.
- Launch each in the BACKGROUND (note the trailing & and the log file):
+ ---- 5) SLOWLORIS  ->  usually NO alert (low-and-slow blind spot) ----
+   First give the victim a real HTTP server (the --services default already
+   starts one on h1). Then:
+   mininet> h6 bash -c "cd attacks && python3 slowloris_attack.py 10.1.1.1 --port 80 --sockets 100 --interval 10"
+
+   Talking point: Slowloris holds many connections open while sending almost
+   no data. Each flow is long-lived and nearly idle, so its per-flow rate and
+   volume look benign; the model's confidence stays below the 0.60 threshold
+   and no alert fires. The attack lives in the CONCURRENCY of many slow flows,
+   a signal the per-flow features do not carry. Press Ctrl+C to stop.
+
+ ---- 6) ARP SPOOFING (MITM)  ->  NO alert (attack outside the 7 classes) ----
+   mininet> h6 bash -c "cd attacks && sudo python3 arp_spoof.py --victim 10.1.1.2 --target 10.1.1.1"
+
+   Talking point: the model knows seven classes - Normal, DoS, DDoS, Probe,
+   BFA, Botnet, Web-Attack - all defined by IP-flow volume or fan-out. ARP
+   poisoning is a layer-2 man-in-the-middle: a trickle of forged ARP replies,
+   no flood and no scan, and it never even becomes an IPv4 flow the extractor
+   reads. So the IDS reports Normal. This is the open-set / novel-attack blind
+   spot: the detector is only ever as complete as its label set. Ctrl+C
+   restores the ARP caches and leaves the network clean.
+
+ -------- OPTIONAL: DISTRIBUTED FLOOD FROM ALL THREE ATTACKERS --------
+ The strongest visual: three red nodes all pointing at one victim. Launch each
+ in the BACKGROUND (note the trailing & and the log file):
    mininet> h6  bash -c "cd attacks && ./syn_flood.sh 10.1.1.1 > /tmp/a6.log 2>&1 &"
    mininet> h9  bash -c "cd attacks && ./syn_flood.sh 10.1.1.1 > /tmp/a9.log 2>&1 &"
    mininet> h12 bash -c "cd attacks && ./syn_flood.sh 10.1.1.1 > /tmp/a12.log 2>&1 &"
 
- To stop the distributed attack (kill hping3 inside each attacker):
+   Note: three real sources is a small fan-in, so the model still labels these
+   as DoS (three separate DoS alerts), not DDoS. For a true DDoS label use the
+   spoofed-source flood in step 3. Stop the distributed attack with:
    mininet> h6 pkill hping3
    mininet> h9 pkill hping3
    mininet> h12 pkill hping3
@@ -160,42 +232,68 @@
    switches laid out core -> aggregation -> edge. Coloured boxes are hosts:
    green = web, blue = dns, purple = db, grey = clients/attackers. Dashed
    links are the noisy "WAN" links.
- * During an attack: the attacker box turns RED, the victim box turns ORANGE,
-   and a red arrow between them is labelled with the attack class and the
-   model's confidence. A red text line above the graph reads e.g.
-   "h6 -> h1 (web) - DoS at 91% confidence".
+ * During a detected attack: the attacker box turns RED, the victim box turns
+   ORANGE, and a red arrow between them is labelled with the attack class and
+   the model's confidence, e.g. "h6 -> h1 (web) - DoS at 91% confidence".
  * "Live Alert Feed" table = every alert, newest first, colour-coded by class.
  * The highlight clears automatically ~15 seconds after the attack stops.
 
  Teacher-friendly talking point: a node only turns red once the ML MODEL has
  detected and reported the traffic (the controller polls flow stats every 3
  seconds), not merely because a script was launched. The map shows what the
- detector actually sees.
+ detector actually sees - including, for the Part B attacks, nothing.
+
+
+==============================================================================
+ SUGGESTED PRESENTATION ORDER (about 5 minutes)
+==============================================================================
+ 1. Show the dashboard idle with background traffic - no alerts. "Normal users
+    do not trip it."
+ 2. SYN flood (step 1) - first alert appears, DoS. Explain the poll-detect-
+    report path while it lights up.
+ 3. Spoofed-source flood (step 3) - DDoS, high source count. Contrast fan-in
+    vs a single-source flood.
+ 4. Port scan (step 4) - shows as DoS; use it to explain flow-stat
+    granularity.
+ 5. ARP spoof (step 6) - no alert; use it to explain the closed-set / novel-
+    attack limitation. End on this: it frames the future-work section.
 
 
 ==============================================================================
  SHUTTING DOWN (after the demo)
 ==============================================================================
-   Terminal 4:  mininet> exit          (stops the network)
+   Terminal 2:  mininet> exit          (stops the network)
    Terminal 3:  Ctrl+C                 (stops the controller)
    Terminal 1:  Ctrl+C                 (stops the backend)
-   Terminal 5:  Ctrl+C                 (stops the dashboard)
+   Terminal 4:  Ctrl+C                 (stops the dashboard)
    Then, to be safe:  sudo mn -c
 
 
 ==============================================================================
  TROUBLESHOOTING
 ==============================================================================
+ * Topology crashes at "*** Adding links:" with "Error creating interface
+   pair ... File exists": leftover state from a previous run. Run "sudo mn -c"
+   by hand, then start the topology again. The topology's in-process auto-clean
+   is not always enough on its own, so the manual "sudo mn -c" is the reliable
+   fix.
  * Dashboard says "Cannot reach backend": Terminal 1 (uvicorn) is not running,
    or is on the wrong port. It must be on port 8000.
- * Dashboard says "No topology yet": Terminal 4 has not started, or was cleaned
-   up. The map appears once topology_state.json exists.
- * Nothing turns red during an attack:
+ * Dashboard says "No topology yet": Terminal 2 (the topology) has not started,
+   or was cleaned up. The map appears once topology_state.json exists.
+ * Nothing turns red during a Part A attack:
      - Check Terminal 3 (Ryu) is printing [ALERT ...] lines. If not, the
        controller may not have loaded the model - run:
          python3 model/train_model.py --csv data/
      - Make sure you attacked 10.1.1.1 from h6 (not h5 / not 10.0.0.1).
      - Run "pingall" first so the switches have learned the hosts.
+     - Wait ~5 seconds: detection is gated by the 3-second flow-stat poll.
+ * Controller prints "Terminated" (or dies) right after you start the
+   topology: the topology's auto-cleanup ran `killall ryu-manager` and killed
+   it. Start the topology (Terminal 2) BEFORE the controller (Terminal 3), and
+   restart the controller after any topology restart.
+ * A Part B attack shows no alert: that is the expected result - see the
+   talking points in steps 4-6.
  * "Address already in use" on port 8000 or 8501: an old backend/dashboard is
    still running. Close it, or pick another port and set IDS_BACKEND_URL.
  * DNS host is idle: dnsmasq is not installed. Optional:
@@ -205,7 +303,7 @@
 ==============================================================================
  OPTIONS - running at a different scale (for the thesis experiments)
 ==============================================================================
- The topology is parametrized. Examples (Terminal 4):
+ The topology is parametrized. Examples (Terminal 2):
 
    # Bigger tree: 4 pods, 2 edges each, 4 hosts each, 5 attackers
    sudo python3 mininet_topo/topology.py --pods 4 --edges-per-pod 2 \
