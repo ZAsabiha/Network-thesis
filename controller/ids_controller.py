@@ -336,12 +336,12 @@ class IDSController(app_manager.RyuApp):
         classes = self.model.classes_
         flagged = {}
         for row, info in zip(proba, infos):
-            idx = int(row.argmax())
-            predicted, confidence = str(classes[idx]), float(row[idx])
-            if predicted == NORMAL_CLASS or confidence < CONFIDENCE_THRESHOLD:
+            # A whitelisted server (its replies/backscatter) is never the
+            # attacker - don't raise alerts for traffic it originates.
+            if info.get("src_mac") in self.whitelist:
                 continue
-            flagged.setdefault((info["dst_ip"], predicted), []).append((info, confidence))
-
+            idx = int(row.argmax())
+        
         for (dst_ip, predicted), items in flagged.items():
             # Report the worst-offending flow as the representative, and say how
             # many distinct sources joined in.
@@ -373,20 +373,15 @@ class IDSController(app_manager.RyuApp):
     def _should_alert(self, dpid, info, attack_class):
         """
         Suppress repeat alerts while the same attack is still in progress.
-
-        Keyed on the VICTIM, not the source: a spoofed flood presents a fresh
-        forged source on every poll, so a source-keyed cooldown never matches
-        and suppresses nothing. ip_proto stays in the key because a host
-        running a SYN flood and a UDP flood at the same victim is two attacks,
-        and the second should not be swallowed as a duplicate of the first.
+        Keyed on the VICTIM (not the switch), so one attack that crosses
+        several switches raises ONE alert, not one per switch.
         """
-        key = (dpid, info["dst_ip"], info["ip_proto"], attack_class)
+        key = (info["dst_ip"], info["ip_proto"], attack_class)
         now = time.time()
         if now - self.last_alert_at.get(key, 0) < ALERT_COOLDOWN_SEC:
             return False
         self.last_alert_at[key] = now
         return True
-
     # ------------------------------------------------------------------
     def _post_alert(self, predicted, confidence, info, dpid, inference_ms,
                     packet_count=None, byte_count=None, source_count=1):
@@ -509,6 +504,12 @@ class IDSController(app_manager.RyuApp):
                 continue
             if mac in self.whitelist:
                 self.logger.warning("[MANUAL-SKIP] %s is whitelisted", mac)
+                self._ack_manual(req.get("id"))
+                continue
+            # Already under an active block (e.g. the detector already caught
+            # it) - don't stack a duplicate record for the same attacker.
+            if time.time() < self.blocked.get(mac, 0):
+                self.logger.info("[MANUAL-SKIP] %s already blocked", mac)
                 self._ack_manual(req.get("id"))
                 continue
             duration = int(req.get("duration_sec") or DEFAULT_BLOCK_SEC)

@@ -3,17 +3,12 @@ streamlit_app.py
 ===================
 Live dashboard polling the FastAPI backend.
 
-Two jobs:
-  1. Raise a visible alert the moment a new attack is detected (red banner +
-     toast) and list the captured alerts in a feed table.
-  2. Draw the Mininet topology you built (from mininet_topo/topology_state.json)
-     and, whenever an attack is active, light up the attacker and the victim on
-     the graph with a red edge between them.
-
-The topology picture updates itself: rebuild the network at a different scale
-and the graph here follows on the next refresh. Attacker/victim identification
-comes straight from the IDS alert (src_ip = attacker, dst_ip = victim), so a
-node only turns red once the model has actually flagged the traffic.
+  1. Alerts: red banner + toasts + a live feed table.
+  2. Topology map (from mininet_topo/topology_state.json): during an attack it
+     lights up the attacker (red) and victim (orange) with a red arrow showing
+     the direction of the attack.
+  3. Mitigation: which attackers are blocked, with a live per-attacker
+     countdown, plus a manual block control in the sidebar.
 
 RUN:
   cd dashboard && streamlit run streamlit_app.py
@@ -45,7 +40,8 @@ DEFAULT_SEVERITY = "#d1495b"
 st.set_page_config(page_title="SDN Intrusion Detection Dashboard", layout="wide")
 st.title("ML-Based SDN Intrusion Detection Dashboard")
 
-refresh_sec = st.sidebar.slider("Refresh interval (sec)", 1, 10, 3)
+refresh_sec = st.sidebar.slider("Refresh interval (sec)", 1, 10, 1)
+
 # ---- manual mitigation control -------------------------------------
 _state = load_state()
 if _state:
@@ -70,8 +66,7 @@ if _state:
             st.sidebar.error("Cannot reach backend.")
 
 # Survives st.rerun(), so we can tell a genuinely new alert apart from one
-# we have already announced. Without this the banner would re-fire on every
-# single refresh for as long as the alert stays in the feed.
+# we have already announced.
 if "last_seen_id" not in st.session_state:
     st.session_state.last_seen_id = None
 
@@ -124,7 +119,6 @@ def render_topology(state, active):
             "automatically once it writes topology_state.json.")
         return
 
-    params = state.get("params", {})
     st.caption(
         "Mode: **%s** · %d switches · %d hosts · attackers: %s"
         % (state.get("mode", "?"), len(state.get("switches", [])),
@@ -151,6 +145,59 @@ def render_topology(state, active):
                "an attack. Dark boxes are switches (core→aggregation→edge).")
 
 
+def render_mitigations(mitigations):
+    """Blocked-attacker panel: one row per attacker (MAC), live countdown."""
+    st.subheader("🛡️ Mitigation — Blocked Attackers")
+    active_blocks = [m for m in mitigations if m.get("active")]
+
+    if not active_blocks:
+        st.info("No attackers currently blocked. A block appears here within "
+                "one poll cycle of an attack being detected.")
+        return
+
+    # Deduplicate by MAC: a host blocked both manually and by the detector is
+    # still ONE blocked attacker. Keep the longest-remaining lease, merge the
+    # reasons (e.g. "DoS, Manual").
+    by_mac = {}
+    for m in active_blocks:
+        mac = m.get("src_mac", "")
+        e = by_mac.get(mac)
+        if e is None:
+            e = {"src_mac": mac, "src_ip": m.get("src_ip", ""),
+                 "remaining_sec": 0, "duration_sec": 0, "classes": set()}
+            by_mac[mac] = e
+        e["classes"].add(m.get("attack_class", "") or "")
+        if not e["src_ip"] and m.get("src_ip"):
+            e["src_ip"] = m.get("src_ip")
+        if (m.get("remaining_sec", 0) or 0) > e["remaining_sec"]:
+            e["remaining_sec"] = m.get("remaining_sec", 0) or 0
+            e["duration_sec"] = m.get("duration_sec", 0) or 0
+
+    rows = list(by_mac.values())
+    st.metric("Currently Blocked", len(rows))
+
+    for e in rows:
+        rem = e["remaining_sec"]
+        dur = e["duration_sec"]
+        permanent = rem > 31_000_000
+        who = e["src_ip"] or e["src_mac"]
+        cls = ", ".join(sorted(c for c in e["classes"] if c)) or "blocked"
+
+        if permanent:
+            st.error(f"🔴 **{e['src_mac']}**  ({who}) — {cls} — "
+                     f"**PERMANENTLY blocked** (repeat offender)")
+        else:
+            st.warning(f"🟠 **{e['src_mac']}**  ({who}) — {cls} — "
+                       f"unblocks in **{int(rem)}s**")
+            frac = max(0.0, min(1.0, rem / dur)) if dur else 0.0
+            st.progress(frac)
+
+    st.caption("One row per attacker (blocked by MAC — a spoofed flood forges "
+               "the IP but not the hardware address). Each block is a lease that "
+               "auto-expires unless it escalates to permanent for a repeat "
+               "offender.")
+
+
 placeholder = st.empty()
 
 with placeholder.container():
@@ -161,11 +208,9 @@ with placeholder.container():
     if alerts is None:
         st.error("Cannot reach backend at "
                   f"{BACKEND_URL}. Is `uvicorn main:app` running in backend/?")
-        # Still show the topology so the map is useful without a backend.
         render_topology(state, [])
     else:
         # ---- new-alert detection -------------------------------------
-        # /alerts comes back newest-first, so the highest id is alerts[0].
         newest_id = alerts[0]["id"] if alerts else None
         first_load = st.session_state.last_seen_id is None
 
@@ -177,8 +222,6 @@ with placeholder.container():
         if newest_id is not None:
             st.session_state.last_seen_id = newest_id
 
-        # Toast every new alert, newest first, capped so a sustained flood
-        # cannot stack hundreds of popups on one refresh.
         for a in fresh[:3]:
             st.toast(
                 f"{a['attack_class']} from {a['src_ip']} "
@@ -194,10 +237,13 @@ with placeholder.container():
         else:
             st.success("No attacks detected. Monitoring...")
 
-        # ---- topology map with attacker/victim highlighting ----------
+        # ---- topology map with attack DIRECTION ----------------------
         ip_map = {h["ip"]: h for h in state["hosts"]} if state else {}
         active = active_attacks(alerts, ip_map, time.time())
         render_topology(state, active)
+
+        # ---- mitigation panel (live countdown) -----------------------
+        render_mitigations(mitigations)
 
         # ---- live alert feed -----------------------------------------
         st.subheader("Live Alert Feed")
@@ -214,27 +260,6 @@ with placeholder.container():
         else:
             st.info("No alerts yet - run an attack simulation from attacks/ "
                      "on the attacker host.")
-        
-                # ---- mitigation / blocked sources ----------------------------
-        st.subheader("🛡️ Mitigation — Blocked Attackers")
-        active_blocks = [m for m in mitigations if m.get("active")]
-        if active_blocks:
-            c1, c2 = st.columns(2)
-            c1.metric("Currently Blocked", len(active_blocks))
-            c2.metric("Total Blocks (this run)", len(mitigations))
-            mdf = pd.DataFrame(active_blocks)
-            mdf["blocked at"] = pd.to_datetime(mdf["blocked_at"], unit="s")
-            mdf["expires in (s)"] = mdf["remaining_sec"].apply(
-                lambda s: "permanent" if s > 31_000_000 else int(round(s)))
-            mdf = mdf[["src_mac", "src_ip", "attack_class", "dpid",
-                       "blocked at", "expires in (s)", "reason"]]
-            st.dataframe(mdf, use_container_width=True, hide_index=True)
-            st.caption("Blocked by MAC — a spoofed flood forges the IP but not "
-                       "the hardware address, so one rule stops it. Each block "
-                       "is a self-expiring lease; an ongoing attack is re-blocked.")
-        else:
-            st.info("No attackers currently blocked. A block appears here within "
-                    "one poll cycle of an attack being detected.")
 
 st.caption(f"Auto-refreshing every {refresh_sec}s. Backend: {BACKEND_URL}")
 time.sleep(refresh_sec)
