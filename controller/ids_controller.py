@@ -104,10 +104,10 @@ SMOOTH_WINDOW_SEC = 15
 MITIGATION_ENABLED = True
 BLOCK_PRIORITY = 100
 BLOCK_DURATION = {
-    "DoS": 30, "DDoS": 30, "Probe": 30,
-    "BFA": 30, "Botnet": 30, "Web-Attack": 30,
+    "DoS": 15, "DDoS": 15, "Probe": 15,
+    "BFA": 15, "Botnet": 15, "Web-Attack": 15,
 }
-DEFAULT_BLOCK_SEC = 30
+DEFAULT_BLOCK_SEC = 15
 MAX_MACS_PER_ALERT = 50
 # Escalation is PER VICTIM (see _mitigate): a victim that has never been
 # attacked by this MAC blocks it with a timed BLOCK_DURATION lease first; if
@@ -694,18 +694,19 @@ class IDSController(app_manager.RyuApp):
                 self.logger.info("[MANUAL-SKIP] %s already blocked", mac)
                 self._ack_manual(req.get("id"))
                 continue
-            duration = int(req.get("duration_sec") or DEFAULT_BLOCK_SEC)
-            hard_to = 0 if PERMANENT_BLOCK else duration
+            # Manual blocks from the dashboard are ALWAYS permanent: an operator
+            # blocking a host by hand is a deliberate decision, not a lease, so
+            # install it with no timeout (hard_timeout=0) and never expire it.
             now = time.time()
-            expires = now + (_FOREVER if PERMANENT_BLOCK else duration)
+            expires = now + _FOREVER
             self.blocked[mac] = expires
             for dp in list(self.datapaths.values()):
-                self._install_block(dp, mac, hard_to)
+                self._install_block(dp, mac, 0)
             self._post_mitigation(mac, req.get("src_ip", ""), "Manual",
                                   req.get("victim") or "(operator)", 0,
-                                  now, expires, duration)
-            self.logger.warning("[MANUAL-MITIGATED] blocked %s for %ds (dashboard)",
-                                mac, duration)
+                                  now, expires, 0)
+            self.logger.warning("[MANUAL-MITIGATED] PERMANENTLY blocked %s (dashboard)",
+                                mac)
             self._ack_manual(req.get("id"))
 
     def _ack_manual(self, req_id):

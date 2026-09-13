@@ -50,15 +50,15 @@ if _state:
     # List every host, not just the attacker-role ones, so any IP can be blocked.
     _labels = {f'{h["name"]} ({h["ip"]}) — {h["role"]}': h for h in _hosts}
     _pick = st.sidebar.selectbox("Host to block", list(_labels.keys()))
-    _dur = st.sidebar.slider("Block for (sec)", 30, 600, 30, step=30)
-    if st.sidebar.button("🚫 Block now"):
+    st.sidebar.caption("Manual blocks are permanent (no timed lease).")
+    if st.sidebar.button("🚫 Block permanently"):
         _h = _labels[_pick]
         try:
             _r = requests.post(f"{BACKEND_URL}/manual_block",
-                               json={"src_mac": _h["mac"], "src_ip": _h["ip"],
-                                     "duration_sec": _dur}, timeout=2)
+                               json={"src_mac": _h["mac"], "src_ip": _h["ip"]},
+                               timeout=2)
             if _r.ok:
-                st.sidebar.success(f'Block requested: {_h["name"]} for {_dur}s '
+                st.sidebar.success(f'Permanent block requested: {_h["name"]} '
                                    f'(applies within ~3s)')
             else:
                 st.sidebar.error("Backend rejected the request.")
