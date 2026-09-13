@@ -20,6 +20,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc
 
 from database import init_db, clear_alerts, get_db, Alert
+from database import (init_db, clear_alerts, clear_mitigations,
+                      clear_manual_blocks, get_db, Alert, Mitigation, ManualBlock)
 
 app = FastAPI(title="SDN IDS Backend")
 
@@ -35,6 +37,8 @@ init_db()
 # dashboard. Run uvicorn WITHOUT --reload so a code edit mid-demo does not
 # wipe the alerts you just captured.
 clear_alerts()
+clear_mitigations()
+clear_manual_blocks()
 
 
 class AlertIn(BaseModel):
@@ -90,6 +94,80 @@ def list_alerts(limit: int = 100, attack_class: Optional[str] = None,
         for r in rows
     ]
 
+
+class MitigationIn(BaseModel):
+    src_mac: str
+    src_ip: str = ""
+    attack_class: str = ""
+    dpid: int = 0
+    blocked_at: float
+    expires_at: float
+    duration_sec: float = 0.0
+    reason: str = ""
+
+
+@app.post("/mitigations")
+def create_mitigation(m: MitigationIn, db: Session = Depends(get_db)):
+    row = Mitigation(**m.dict())
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"status": "ok", "id": row.id}
+
+
+@app.get("/mitigations")
+def list_mitigations(limit: int = 200, active_only: bool = False,
+                     db: Session = Depends(get_db)):
+    rows = (db.query(Mitigation).order_by(desc(Mitigation.blocked_at))
+            .limit(limit).all())
+    now = time.time()
+    out = []
+    for r in rows:
+        active = (r.expires_at or 0) > now
+        if active_only and not active:
+            continue
+        out.append({
+            "id": r.id, "src_mac": r.src_mac, "src_ip": r.src_ip or "",
+            "attack_class": r.attack_class, "dpid": r.dpid,
+            "blocked_at": r.blocked_at, "expires_at": r.expires_at,
+            "duration_sec": r.duration_sec, "reason": r.reason or "",
+            "active": active,
+            "remaining_sec": max(0.0, (r.expires_at or 0) - now),
+        })
+    return out
+
+class ManualBlockIn(BaseModel):
+    src_mac: str
+    src_ip: str = ""
+    duration_sec: float = 120.0
+    victim: str = ""
+
+
+@app.post("/manual_block")
+def create_manual_block(m: ManualBlockIn, db: Session = Depends(get_db)):
+    row = ManualBlock(src_mac=m.src_mac, src_ip=m.src_ip,
+                      duration_sec=m.duration_sec, victim=m.victim,
+                      created_at=time.time(), applied=0)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"status": "ok", "id": row.id}
+
+
+@app.get("/manual_block/pending")
+def pending_manual_blocks(db: Session = Depends(get_db)):
+    rows = db.query(ManualBlock).filter(ManualBlock.applied == 0).all()
+    return [{"id": r.id, "src_mac": r.src_mac, "src_ip": r.src_ip,
+             "duration_sec": r.duration_sec, "victim": r.victim} for r in rows]
+
+
+@app.post("/manual_block/ack")
+def ack_manual_block(payload: dict, db: Session = Depends(get_db)):
+    row = db.query(ManualBlock).filter(ManualBlock.id == payload.get("id")).first()
+    if row:
+        row.applied = 1
+        db.commit()
+    return {"status": "ok"}
 
 @app.get("/stats")
 def get_stats(window_sec: int = 3600, db: Session = Depends(get_db)):

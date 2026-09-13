@@ -23,10 +23,10 @@
     "Probe",
     "Web-Attack"
   ],
-  "dataset": "/home/sabiha/sdn-te-project/data",
+  "dataset": "/home/tanziarahman/Network-thesis/data",
   "thesis_ready": true,
-  "training_date": "2026-09-10T16:26:00+00:00",
-  "training_seconds": 2.6,
+  "training_date": "2026-09-12T06:51:10+00:00",
+  "training_seconds": 3.3,
   "n_train_samples": 88249,
   "n_test_samples": 29417,
   "model_size_mb": 35.5,
@@ -205,23 +205,23 @@
   },
   "latency": {
     "single_flow_ms": {
-      "mean": 56.038,
-      "p50": 52.535,
-      "p95": 73.529,
-      "p99": 83.707
+      "mean": 47.298,
+      "p50": 48.701,
+      "p95": 52.683,
+      "p99": 66.781
     },
     "batched": {
       "batch_8": {
-        "total_ms": 51.252,
-        "per_flow_ms": 6.4066
+        "total_ms": 43.018,
+        "per_flow_ms": 5.3773
       },
       "batch_32": {
-        "total_ms": 52.82,
-        "per_flow_ms": 1.6506
+        "total_ms": 43.87,
+        "per_flow_ms": 1.3709
       },
       "batch_128": {
-        "total_ms": 76.949,
-        "per_flow_ms": 0.6012
+        "total_ms": 73.777,
+        "per_flow_ms": 0.5764
       }
     },
     "note": "Model inference only. End-to-end detection latency also includes the flow-stats poll interval, which dominates."
@@ -284,9 +284,9 @@
     "Port scan     3 pkts, 800 dsts"
   ],
   "environment": {
-    "python": "3.9.25",
-    "scikit_learn": "1.6.1",
-    "numpy": "2.0.2",
+    "python": "3.10.12",
+    "scikit_learn": "1.7.2",
+    "numpy": "2.2.6",
     "pandas": "2.3.3"
   }
 }

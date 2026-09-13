@@ -73,6 +73,28 @@ ALERT_COOLDOWN_SEC = 10
 
 NORMAL_CLASS = "Normal"
 
+# ----------------------------------------------------------------------------
+# MITIGATION. On an alert the controller pushes a high-priority DROP flow that
+# matches the attacker's MAC address, cutting them off in the data plane. MAC,
+# not IP, because a spoofed flood forges a new source IP every packet but keeps
+# one real MAC - so a single MAC rule stops the whole flood. Each block is a
+# self-expiring LEASE, so a wrong block heals itself instead of blackholing a
+# host forever.
+# ----------------------------------------------------------------------------
+MITIGATION_ENABLED = True
+BLOCK_PRIORITY = 100          # above learned flows (1) and table-miss (0)
+BLOCK_DURATION = {            # seconds to block, per attack class
+    "DoS": 60, "DDoS": 120, "Probe": 90,
+    "BFA": 120, "Botnet": 120, "Web-Attack": 90,
+}
+DEFAULT_BLOCK_SEC = 60
+MAX_MACS_PER_ALERT = 50       # safety cap on rules installed per alert
+# Blocks are permanent: once caught, an attacker stays blocked until manually
+# removed, so the attack cannot resume when a timed lease expires. Set False to
+# go back to self-expiring leases of BLOCK_DURATION seconds.
+PERMANENT_BLOCK = True
+_FOREVER = 10 ** 9   # sentinel "expiry" so the dashboard shows it as active
+
 
 class IDSController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
@@ -82,6 +104,11 @@ class IDSController(app_manager.RyuApp):
         self.mac_to_port = {}
         self.datapaths = {}
         self.last_alert_at = {}
+        # Mitigation state: MAC -> lease-expiry epoch (so we don't re-block an
+        # already-blocked MAC every poll). whitelist = server/victim MACs that
+        # must never be blocked, read from the topology state file.
+        self.blocked = {}
+        self.whitelist = self._load_whitelist()
 
         # Rolling inference-latency window, reported for the thesis metrics.
         self.latency_ms = deque(maxlen=500)
@@ -98,6 +125,26 @@ class IDSController(app_manager.RyuApp):
         self._load_model()
 
         self.monitor_thread = hub.spawn(self._monitor)
+    
+    def _load_whitelist(self):
+        """Server/victim MAC addresses that must never be blocked."""
+        wl = set()
+        state_path = os.path.join(THIS_DIR, "..", "mininet_topo",
+                                  "topology_state.json")
+        try:
+            with open(state_path) as fh:
+                state = json.load(fh)
+            protected_ips = set(state.get("servers", {}).values())
+            if state.get("victim_ip"):
+                protected_ips.add(state["victim_ip"])
+            for h in state.get("hosts", []):
+                if h.get("ip") in protected_ips and h.get("mac"):
+                    wl.add(h["mac"])
+        except (OSError, ValueError):
+            self.logger.info("No readable topology_state.json - whitelist empty.")
+        self.logger.info("Mitigation whitelist MACs (never blocked): %s",
+                         sorted(wl) or "none")
+        return wl
 
     # ------------------------------------------------------------------
     # Model loading + the checks that would have caught the original bug
@@ -227,6 +274,7 @@ class IDSController(app_manager.RyuApp):
             ip = pkt.get_protocol(ipv4.ipv4)
             if ip is not None:
                 match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP,
+                                        eth_src=src, 
                                         ipv4_src=ip.src, ipv4_dst=ip.dst,
                                         ip_proto=ip.proto)
             else:
@@ -246,6 +294,7 @@ class IDSController(app_manager.RyuApp):
         while True:
             for dp in list(self.datapaths.values()):
                 dp.send_msg(dp.ofproto_parser.OFPFlowStatsRequest(dp))
+            self._poll_manual_blocks()
             hub.sleep(POLL_INTERVAL_SEC)
 
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
@@ -313,6 +362,8 @@ class IDSController(app_manager.RyuApp):
                 info["packet_count"] / max(info["duration_sec"], 1e-3), per_flow_ms)
             self._post_alert(predicted, confidence, info, dpid, per_flow_ms,
                              packets, byts, len(sources))
+            # Closed-loop response: block the attacker, don't just report it.
+            self._mitigate(predicted, dst_ip, [i for i, _ in items], dpid)
 
         if self.flows_seen and self.latency_ms:
             avg = sum(self.latency_ms) / len(self.latency_ms)
@@ -362,3 +413,106 @@ class IDSController(app_manager.RyuApp):
             requests.post(f"{BACKEND_URL}/alerts", json=payload, timeout=1)
         except requests.exceptions.RequestException:
             self.logger.debug("Backend unreachable - alert logged locally only")
+
+        # ------------------------------------------------------------------
+    # Mitigation: block the attacker's MAC for a class-dependent lease
+    # ------------------------------------------------------------------
+    def _mitigate(self, attack_class, dst_ip, infos, dpid):
+        if not MITIGATION_ENABLED:
+            return
+        duration = BLOCK_DURATION.get(attack_class, DEFAULT_BLOCK_SEC)
+        hard_to = 0 if PERMANENT_BLOCK else duration
+        now = time.time()
+
+        mac_to_ip = {}
+        for info in infos:
+            mac = info.get("src_mac")
+            if mac:
+                mac_to_ip.setdefault(mac, info.get("src_ip"))
+
+        newly = []
+        for mac in list(mac_to_ip)[:MAX_MACS_PER_ALERT]:
+            if mac in self.whitelist:
+                continue
+            if now < self.blocked.get(mac, 0):
+                continue
+            expires = now + (_FOREVER if PERMANENT_BLOCK else duration)
+            self.blocked[mac] = expires
+            for dp in list(self.datapaths.values()):
+                self._install_block(dp, mac, hard_to)
+            self._post_mitigation(mac, mac_to_ip[mac], attack_class, dst_ip,
+                                  dpid, now, expires, duration)
+            newly.append(mac)
+
+        if newly:
+            how = "permanently" if PERMANENT_BLOCK else f"for {duration}s"
+            self.logger.warning("[MITIGATED] %s -> %s: blocked %d MAC(s) %s: %s",
+                                attack_class, dst_ip, len(newly), how,
+                                ", ".join(newly))
+
+    def _install_block(self, datapath, mac, hard_timeout):
+        """Drop everything from this MAC. Empty instruction list == drop.
+        hard_timeout=0 makes the block permanent (stays until removed)."""
+        parser = datapath.ofproto_parser
+        ofproto = datapath.ofproto
+        match = parser.OFPMatch(eth_src=mac)
+        mod = parser.OFPFlowMod(
+            datapath=datapath, priority=BLOCK_PRIORITY, match=match,
+            instructions=[], hard_timeout=int(hard_timeout),
+            command=ofproto.OFPFC_ADD)
+        datapath.send_msg(mod)
+
+    def _post_mitigation(self, mac, sample_ip, attack_class, dst_ip, dpid,
+                         blocked_at, expires_at, duration):
+        payload = {
+            "src_mac": mac,
+            "src_ip": sample_ip or "",
+            "attack_class": attack_class,
+            "dpid": dpid,
+            "blocked_at": blocked_at,
+            "expires_at": expires_at,
+            "duration_sec": duration,
+            "reason": f"{attack_class} against {dst_ip}",
+        }
+        try:
+            requests.post(f"{BACKEND_URL}/mitigations", json=payload, timeout=1)
+        except requests.exceptions.RequestException:
+            self.logger.debug("Backend unreachable - mitigation logged locally only")
+    
+    def _poll_manual_blocks(self):
+        """Apply block requests made from the dashboard."""
+        try:
+            resp = requests.get(f"{BACKEND_URL}/manual_block/pending", timeout=1)
+            pending = resp.json()
+        except (requests.exceptions.RequestException, ValueError):
+            return
+
+        for req in pending:
+            mac = req.get("src_mac")
+            if not mac:
+                self._ack_manual(req.get("id"))
+                continue
+            if mac in self.whitelist:
+                self.logger.warning("[MANUAL-SKIP] %s is whitelisted", mac)
+                self._ack_manual(req.get("id"))
+                continue
+            duration = int(req.get("duration_sec") or DEFAULT_BLOCK_SEC)
+            hard_to = 0 if PERMANENT_BLOCK else duration
+            now = time.time()
+            expires = now + (_FOREVER if PERMANENT_BLOCK else duration)
+            self.blocked[mac] = expires
+            for dp in list(self.datapaths.values()):
+                self._install_block(dp, mac, hard_to)
+            self._post_mitigation(mac, req.get("src_ip", ""), "Manual",
+                                  req.get("victim") or "(operator)", 0,
+                                  now, expires, duration)
+            self.logger.warning("[MANUAL-MITIGATED] blocked %s for %ds (dashboard)",
+                                mac, duration)
+            self._ack_manual(req.get("id"))
+
+    def _ack_manual(self, req_id):
+        try:
+            requests.post(f"{BACKEND_URL}/manual_block/ack",
+                          json={"id": req_id}, timeout=1)
+        except requests.exceptions.RequestException:
+            pass

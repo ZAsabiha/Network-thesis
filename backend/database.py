@@ -47,6 +47,45 @@ class Alert(Base):
     # thousands for a spoofed flood collapsed into one row.
     source_count = Column(Integer, default=1)
 
+class Mitigation(Base):
+    """One row per block. Keyed on the attacker's MAC; src_ip is a sample of
+    the (possibly spoofed) IPs seen behind it, kept only for readability."""
+
+    __tablename__ = "mitigations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    src_mac = Column(String, index=True)
+    src_ip = Column(String, default="")
+    attack_class = Column(String)
+    dpid = Column(Integer)
+    blocked_at = Column(Float, index=True)
+    expires_at = Column(Float)
+    duration_sec = Column(Float, default=0.0)
+    reason = Column(String, default="")
+
+class ManualBlock(Base):
+    """A block requested from the dashboard. The controller polls for pending
+    rows, installs the drop, then marks them applied."""
+
+    __tablename__ = "manual_blocks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    src_mac = Column(String, index=True)
+    src_ip = Column(String, default="")
+    duration_sec = Column(Float, default=120.0)
+    victim = Column(String, default="")
+    created_at = Column(Float)
+    applied = Column(Integer, default=0)
+
+
+def clear_manual_blocks():
+    with engine.begin() as conn:
+        conn.execute(text(f"DELETE FROM {ManualBlock.__tablename__}"))
+
+def clear_mitigations():
+    with engine.begin() as conn:
+        conn.execute(text(f"DELETE FROM {Mitigation.__tablename__}"))
+
 
 def init_db():
     Base.metadata.create_all(bind=engine)

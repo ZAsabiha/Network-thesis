@@ -79,9 +79,8 @@ def _read_counters(flow_stat):
     return {
         "src_ip": match.get("ipv4_src", match.get("eth_src", "unknown")),
         "dst_ip": match.get("ipv4_dst", match.get("eth_dst", "unknown")),
+        "src_mac": match.get("eth_src"),          # <-- add this line
         "in_port": match.get("in_port"),
-        # Absent on the table-miss rule and any L2-only match; the model reads
-        # a missing protocol as IANA 0 ("other").
         "ip_proto": match.get("ip_proto"),
         "duration_sec": duration_sec,
         "packet_count": flow_stat.packet_count,

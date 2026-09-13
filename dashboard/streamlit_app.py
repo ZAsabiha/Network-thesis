@@ -46,6 +46,28 @@ st.set_page_config(page_title="SDN Intrusion Detection Dashboard", layout="wide"
 st.title("ML-Based SDN Intrusion Detection Dashboard")
 
 refresh_sec = st.sidebar.slider("Refresh interval (sec)", 1, 10, 3)
+# ---- manual mitigation control -------------------------------------
+_state = load_state()
+if _state:
+    st.sidebar.markdown("### 🛡️ Manual Block")
+    _hosts = _state.get("hosts", [])
+    _attackers = [h for h in _hosts if h["role"] == "attacker"] or _hosts
+    _labels = {f'{h["name"]} ({h["ip"]})': h for h in _attackers}
+    _pick = st.sidebar.selectbox("Attacker to block", list(_labels.keys()))
+    _dur = st.sidebar.slider("Block for (sec)", 30, 600, 120, step=30)
+    if st.sidebar.button("🚫 Block now"):
+        _h = _labels[_pick]
+        try:
+            _r = requests.post(f"{BACKEND_URL}/manual_block",
+                               json={"src_mac": _h["mac"], "src_ip": _h["ip"],
+                                     "duration_sec": _dur}, timeout=2)
+            if _r.ok:
+                st.sidebar.success(f'Block requested: {_h["name"]} for {_dur}s '
+                                   f'(applies within ~3s)')
+            else:
+                st.sidebar.error("Backend rejected the request.")
+        except requests.exceptions.RequestException:
+            st.sidebar.error("Cannot reach backend.")
 
 # Survives st.rerun(), so we can tell a genuinely new alert apart from one
 # we have already announced. Without this the banner would re-fire on every
@@ -133,6 +155,7 @@ placeholder = st.empty()
 
 with placeholder.container():
     alerts = fetch_json("/alerts", {"limit": 200})
+    mitigations = fetch_json("/mitigations", {"limit": 200}) or []
     state = load_state()
 
     if alerts is None:
@@ -191,6 +214,27 @@ with placeholder.container():
         else:
             st.info("No alerts yet - run an attack simulation from attacks/ "
                      "on the attacker host.")
+        
+                # ---- mitigation / blocked sources ----------------------------
+        st.subheader("🛡️ Mitigation — Blocked Attackers")
+        active_blocks = [m for m in mitigations if m.get("active")]
+        if active_blocks:
+            c1, c2 = st.columns(2)
+            c1.metric("Currently Blocked", len(active_blocks))
+            c2.metric("Total Blocks (this run)", len(mitigations))
+            mdf = pd.DataFrame(active_blocks)
+            mdf["blocked at"] = pd.to_datetime(mdf["blocked_at"], unit="s")
+            mdf["expires in (s)"] = mdf["remaining_sec"].apply(
+                lambda s: "permanent" if s > 31_000_000 else int(round(s)))
+            mdf = mdf[["src_mac", "src_ip", "attack_class", "dpid",
+                       "blocked at", "expires in (s)", "reason"]]
+            st.dataframe(mdf, use_container_width=True, hide_index=True)
+            st.caption("Blocked by MAC — a spoofed flood forges the IP but not "
+                       "the hardware address, so one rule stops it. Each block "
+                       "is a self-expiring lease; an ongoing attack is re-blocked.")
+        else:
+            st.info("No attackers currently blocked. A block appears here within "
+                    "one poll cycle of an attack being detected.")
 
 st.caption(f"Auto-refreshing every {refresh_sec}s. Backend: {BACKEND_URL}")
 time.sleep(refresh_sec)
