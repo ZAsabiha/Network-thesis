@@ -48,7 +48,7 @@
  -------- TERMINAL 2 : MININET TOPOLOGY (the network) --------
    cd /home/sabiha/sdn-te-project
    sudo mn -c
-   sudo python3 mininet_topo/topology.py --traffic
+   sudo python3 mininet_topo/topology.py 
 
    Run "sudo mn -c" FIRST, every time, then start the topology. The topology
    also auto-cleans in-process before it builds, but that is not always enough

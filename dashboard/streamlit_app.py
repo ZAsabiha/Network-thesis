@@ -50,7 +50,7 @@ if _state:
     _attackers = [h for h in _hosts if h["role"] == "attacker"] or _hosts
     _labels = {f'{h["name"]} ({h["ip"]})': h for h in _attackers}
     _pick = st.sidebar.selectbox("Attacker to block", list(_labels.keys()))
-    _dur = st.sidebar.slider("Block for (sec)", 30, 600, 120, step=30)
+    _dur = st.sidebar.slider("Block for (sec)", 30, 600, 30, step=30)
     if st.sidebar.button("🚫 Block now"):
         _h = _labels[_pick]
         try:
@@ -145,10 +145,16 @@ def render_topology(state, active):
                "an attack. Dark boxes are switches (core→aggregation→edge).")
 
 
-def render_mitigations(mitigations):
+def render_mitigations(mitigations, state=None):
     """Blocked-attacker panel: one row per attacker (MAC), live countdown."""
     st.subheader("🛡️ Mitigation — Blocked Attackers")
     active_blocks = [m for m in mitigations if m.get("active")]
+
+    # Map hardware/IP back to the friendly host name (h1, h6, ...) so the
+    # panel shows WHICH host is blocked, not just its MAC/IP.
+    _hosts = (state or {}).get("hosts", [])
+    name_by_mac = {h.get("mac"): h.get("name") for h in _hosts}
+    name_by_ip = {h.get("ip"): h.get("name") for h in _hosts}
 
     if not active_blocks:
         st.info("No attackers currently blocked. A block appears here within "
@@ -181,13 +187,15 @@ def render_mitigations(mitigations):
         dur = e["duration_sec"]
         permanent = rem > 31_000_000
         who = e["src_ip"] or e["src_mac"]
+        host_name = name_by_mac.get(e["src_mac"]) or name_by_ip.get(e["src_ip"])
+        label = f"{host_name} — {e['src_mac']}" if host_name else e["src_mac"]
         cls = ", ".join(sorted(c for c in e["classes"] if c)) or "blocked"
 
         if permanent:
-            st.error(f"🔴 **{e['src_mac']}**  ({who}) — {cls} — "
+            st.error(f"🔴 **{label}**  ({who}) — {cls} — "
                      f"**PERMANENTLY blocked** (repeat offender)")
         else:
-            st.warning(f"🟠 **{e['src_mac']}**  ({who}) — {cls} — "
+            st.warning(f"🟠 **{label}**  ({who}) — {cls} — "
                        f"unblocks in **{int(rem)}s**")
             frac = max(0.0, min(1.0, rem / dur)) if dur else 0.0
             st.progress(frac)
@@ -243,7 +251,7 @@ with placeholder.container():
         render_topology(state, active)
 
         # ---- mitigation panel (live countdown) -----------------------
-        render_mitigations(mitigations)
+        render_mitigations(mitigations, state)
 
         # ---- live alert feed -----------------------------------------
         st.subheader("Live Alert Feed")

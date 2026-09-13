@@ -92,14 +92,17 @@ MIN_CLASSIFY_PACKETS = 5
 MITIGATION_ENABLED = True
 BLOCK_PRIORITY = 100
 BLOCK_DURATION = {
-    "DoS": 120, "DDoS": 120, "Probe": 120,
-    "BFA": 120, "Botnet": 120, "Web-Attack": 120,
+    "DoS": 30, "DDoS": 30, "Probe": 30,
+    "BFA": 30, "Botnet": 30, "Web-Attack": 30,
 }
-DEFAULT_BLOCK_SEC = 120
+DEFAULT_BLOCK_SEC = 30
 MAX_MACS_PER_ALERT = 50
-# First offence = a timed BLOCK_DURATION lease. On the Nth time we have to
-# block the same attacker, the block becomes permanent (repeat offender).
-REPEAT_OFFENCE_LIMIT = 2
+# Escalation is PER VICTIM (see _mitigate): a victim that has never been
+# attacked by this MAC blocks it with a timed BLOCK_DURATION lease first; if
+# the same MAC returns to a victim that already blocked it, the block is
+# permanent. A sustained attack escalates the same way, because the victim
+# is recorded on the very first block.
+REPEAT_OFFENCE_LIMIT = 2      # unused now; escalation is per-victim, kept for ref
 PERMANENT_BLOCK = False       # first offence is timed; escalation handles repeats
 _FOREVER = 10 ** 9
 
@@ -116,6 +119,10 @@ class IDSController(app_manager.RyuApp):
         # must never be blocked, read from the topology state file.
         self.blocked = {}
         self.offense_count = {}       # MAC -> how many times we've blocked it
+        # MAC -> set of victim IPs this attacker has already been blocked for.
+        # A victim already in this set 'knows' the attacker, so a repeat hit
+        # on it is blocked permanently instead of getting another lease.
+        self.attacked_victims = {}
         self.whitelist = self._load_whitelist()
 
         # Rolling inference-latency window, reported for the thesis metrics.
@@ -483,11 +490,16 @@ class IDSController(app_manager.RyuApp):
             if now < self.blocked.get(mac, 0):     # still under an active lease
                 continue
 
-            # Escalation: each time we have to install a *fresh* block for this
-            # MAC counts as one offence. First offence -> timed lease; a repeat
-            # offender (came back after its lease expired) -> permanent block.
+            # Escalation is PER VICTIM. A victim that has never been attacked by
+            # this MAC gives it one timed lease. The block turns permanent the
+            # moment this MAC is blocked for a victim that already blocked it
+            # before - whether the attacker withdrew and later came back to that
+            # victim, or never stopped and the first lease simply aged out (the
+            # victim is already on record either way).
+            prior_victims = self.attacked_victims.setdefault(mac, set())
+            repeat = dst_ip in prior_victims
+            prior_victims.add(dst_ip)
             self.offense_count[mac] = self.offense_count.get(mac, 0) + 1
-            repeat = self.offense_count[mac] >= REPEAT_OFFENCE_LIMIT
 
             if repeat:
                 hard_to, expires, rec_dur = 0, now + _FOREVER, 0
@@ -505,8 +517,8 @@ class IDSController(app_manager.RyuApp):
             if repeat:
                 self.logger.warning(
                     "[MITIGATED] %s -> %s: PERMANENTLY blocked %s "
-                    "(repeat offender, offence #%d)",
-                    attack_class, dst_ip, mac, self.offense_count[mac])
+                    "(repeat against a victim that already blocked it)",
+                    attack_class, dst_ip, mac)
             else:
                 self.logger.warning(
                     "[MITIGATED] %s -> %s: blocked %s for %ds (offence #1)",
