@@ -82,19 +82,18 @@ NORMAL_CLASS = "Normal"
 # host forever.
 # ----------------------------------------------------------------------------
 MITIGATION_ENABLED = True
-BLOCK_PRIORITY = 100          # above learned flows (1) and table-miss (0)
-BLOCK_DURATION = {            # seconds to block, per attack class
-    "DoS": 60, "DDoS": 120, "Probe": 90,
-    "BFA": 120, "Botnet": 120, "Web-Attack": 90,
+BLOCK_PRIORITY = 100
+BLOCK_DURATION = {
+    "DoS": 120, "DDoS": 120, "Probe": 120,
+    "BFA": 120, "Botnet": 120, "Web-Attack": 120,
 }
-DEFAULT_BLOCK_SEC = 60
-MAX_MACS_PER_ALERT = 50       # safety cap on rules installed per alert
-# Blocks are permanent: once caught, an attacker stays blocked until manually
-# removed, so the attack cannot resume when a timed lease expires. Set False to
-# go back to self-expiring leases of BLOCK_DURATION seconds.
-PERMANENT_BLOCK = True
-_FOREVER = 10 ** 9   # sentinel "expiry" so the dashboard shows it as active
-
+DEFAULT_BLOCK_SEC = 120
+MAX_MACS_PER_ALERT = 50
+# First offence = a timed BLOCK_DURATION lease. On the Nth time we have to
+# block the same attacker, the block becomes permanent (repeat offender).
+REPEAT_OFFENCE_LIMIT = 2
+PERMANENT_BLOCK = False       # first offence is timed; escalation handles repeats
+_FOREVER = 10 ** 9
 
 class IDSController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
@@ -108,6 +107,7 @@ class IDSController(app_manager.RyuApp):
         # already-blocked MAC every poll). whitelist = server/victim MACs that
         # must never be blocked, read from the topology state file.
         self.blocked = {}
+        self.offense_count = {}       # MAC -> how many times we've blocked it
         self.whitelist = self._load_whitelist()
 
         # Rolling inference-latency window, reported for the thesis metrics.
@@ -421,7 +421,6 @@ class IDSController(app_manager.RyuApp):
         if not MITIGATION_ENABLED:
             return
         duration = BLOCK_DURATION.get(attack_class, DEFAULT_BLOCK_SEC)
-        hard_to = 0 if PERMANENT_BLOCK else duration
         now = time.time()
 
         mac_to_ip = {}
@@ -434,21 +433,37 @@ class IDSController(app_manager.RyuApp):
         for mac in list(mac_to_ip)[:MAX_MACS_PER_ALERT]:
             if mac in self.whitelist:
                 continue
-            if now < self.blocked.get(mac, 0):
+            if now < self.blocked.get(mac, 0):     # still under an active lease
                 continue
-            expires = now + (_FOREVER if PERMANENT_BLOCK else duration)
+
+            # Escalation: each time we have to install a *fresh* block for this
+            # MAC counts as one offence. First offence -> timed lease; a repeat
+            # offender (came back after its lease expired) -> permanent block.
+            self.offense_count[mac] = self.offense_count.get(mac, 0) + 1
+            repeat = self.offense_count[mac] >= REPEAT_OFFENCE_LIMIT
+
+            if repeat:
+                hard_to, expires, rec_dur = 0, now + _FOREVER, 0
+            else:
+                hard_to, expires, rec_dur = duration, now + duration, duration
+
             self.blocked[mac] = expires
             for dp in list(self.datapaths.values()):
                 self._install_block(dp, mac, hard_to)
             self._post_mitigation(mac, mac_to_ip[mac], attack_class, dst_ip,
-                                  dpid, now, expires, duration)
-            newly.append(mac)
+                                  dpid, now, expires, rec_dur)
+            newly.append((mac, repeat))
 
-        if newly:
-            how = "permanently" if PERMANENT_BLOCK else f"for {duration}s"
-            self.logger.warning("[MITIGATED] %s -> %s: blocked %d MAC(s) %s: %s",
-                                attack_class, dst_ip, len(newly), how,
-                                ", ".join(newly))
+        for mac, repeat in newly:
+            if repeat:
+                self.logger.warning(
+                    "[MITIGATED] %s -> %s: PERMANENTLY blocked %s "
+                    "(repeat offender, offence #%d)",
+                    attack_class, dst_ip, mac, self.offense_count[mac])
+            else:
+                self.logger.warning(
+                    "[MITIGATED] %s -> %s: blocked %s for %ds (offence #1)",
+                    attack_class, dst_ip, mac, duration)
 
     def _install_block(self, datapath, mac, hard_timeout):
         """Drop everything from this MAC. Empty instruction list == drop.
